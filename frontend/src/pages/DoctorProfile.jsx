@@ -5,7 +5,7 @@ import { User, Save, Loader2, Camera, Building, Phone, Mail, Stethoscope } from 
 import useAuthStore from "../store/authStore";
 import React from "react";
 export default function DoctorProfile() {
-    const { currentUser } = useAuthStore();
+    const { currentUser, updateUserProfile } = useAuthStore();
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [formData, setFormData] = useState({
@@ -72,6 +72,13 @@ export default function DoctorProfile() {
 
             // Update local state with response (might contain new image URL)
             setFormData(prev => ({ ...prev, ...res.data }));
+
+            // Sync with Firebase Auth and Global Store
+            await updateUserProfile({
+                displayName: formData.name,
+                photoURL: res.data.profileImage || currentUser?.photoURL
+            });
+
             setMessage({ type: "success", text: "Profile updated successfully!" });
         } catch (err) {
             console.error("Error updating profile:", err);
@@ -130,7 +137,7 @@ export default function DoctorProfile() {
                                         <input
                                             type="text"
                                             name="name"
-                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
                                             value={formData.name}
                                             onChange={handleChange}
                                         />
@@ -144,7 +151,7 @@ export default function DoctorProfile() {
                                         <input
                                             type="text"
                                             name="specialization"
-                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
                                             value={formData.specialization}
                                             onChange={handleChange}
                                         />
@@ -158,7 +165,7 @@ export default function DoctorProfile() {
                                         <input
                                             type="text"
                                             name="clinicName"
-                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
                                             value={formData.clinicName}
                                             onChange={handleChange}
                                         />
@@ -187,7 +194,7 @@ export default function DoctorProfile() {
                                         <input
                                             type="tel"
                                             name="phone"
-                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                            className="w-full pl-10 p-2.5 rounded-lg border border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
                                             value={formData.phone}
                                             onChange={handleChange}
                                         />

@@ -159,9 +159,108 @@ const addPatientImage = async (req, res) => {
     }
 };
 
+// Analyze skin image (Mock AI)
+const analyzeSkinImage = async (req, res) => {
+    try {
+        const { imageUrl } = req.body;
+        if (!imageUrl) {
+            return res.status(400).json({ error: "Image URL is required" });
+        }
+
+        console.log("Analyzing image:", imageUrl);
+
+        // Simulate AI Processing Delay
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Mock Result
+        const diseases = [
+            { name: "Melanoma", severity: "High", description: "A serious form of skin cancer that begins in the cells known as melanocytes." },
+            { name: "Basal Cell Carcinoma", severity: "Medium", description: "A type of skin cancer that begins in the basal cells." },
+            { name: "Eczema (Atopic Dermatitis)", severity: "Low", description: "A condition that makes your skin red and itchy." },
+            { name: "Psoriasis", severity: "Medium", description: "A condition in which skin cells build up and form scales and itchy, dry patches." },
+            { name: "Benign Keratosis", severity: "Low", description: "A non-cancerous skin growth that appears waxy, brown, black, or tan." }
+        ];
+
+        const randomDisease = diseases[Math.floor(Math.random() * diseases.length)];
+        const confidence = (Math.random() * (0.99 - 0.75) + 0.75).toFixed(2); // Random confidence between 75% and 99%
+
+        const report = `
+**DERMATOLOGICAL ANALYSIS REPORT**
+--------------------------------
+**Date:** ${new Date().toLocaleDateString()}
+**Image Source:** Uploaded Scan
+
+**DIAGNOSIS:** ${randomDisease.name}
+**CONFIDENCE SCORE:** ${(confidence * 100).toFixed(1)}%
+**SEVERITY:** ${randomDisease.severity}
+
+**DESCRIPTION:**
+${randomDisease.description}
+
+**RECOMMENDED ACTIONS:**
+1. Clinical correlation suggested.
+2. ${randomDisease.severity === 'High' ? 'Urgent biopsy recommended.' : 'Monitor for changes in size, shape, or color.'}
+3. Follow-up usage of sunscreen and protective clothing.
+
+*Disclaimer: This is an AI-generated analysis and does not replace professional medical advice.*
+        `;
+
+        res.json({
+            diagnosis: randomDisease.name,
+            confidence: confidence,
+            severity: randomDisease.severity,
+            report: report.trim()
+        });
+
+    } catch (error) {
+        console.error("Analysis failed:", error);
+        res.status(500).json({ error: "Failed to analyze image" });
+    }
+};
+
+// Delete a patient
+const deletePatient = async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.collection("patients").doc(id).delete();
+        res.json({ message: "Patient deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting patient:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// Delete a specific image from patient gallery
+const deletePatientImage = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const imageUrl = req.body.imageUrl || req.query.imageUrl;
+
+        console.log(`Attempting to delete image for patient ${id}. URL: ${imageUrl}`);
+
+        if (!imageUrl) {
+            return res.status(400).json({ error: "Image URL is required" });
+        }
+
+        const docRef = db.collection("patients").doc(id);
+        await docRef.update({
+            skinImages: admin.firestore.FieldValue.arrayRemove(imageUrl)
+        });
+
+        res.json({ message: "Image deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting image:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 module.exports = {
     getPatients,
     createPatient,
     getPatientById,
-    addPatientImage
+    addPatientImage,
+    analyzeSkinImage,
+    deletePatient,
+    deletePatientImage
 };
+

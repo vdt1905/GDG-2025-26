@@ -5,7 +5,8 @@ import {
     signOut,
     onAuthStateChanged,
     GoogleAuthProvider,
-    signInWithPopup
+    signInWithPopup,
+    updateProfile
 } from "firebase/auth";
 import { auth } from "../firebase";
 
@@ -21,8 +22,14 @@ const useAuthStore = create((set) => ({
         return unsubscribe;
     },
 
-    signup: async (email, password) => {
-        return createUserWithEmailAndPassword(auth, email, password);
+    signup: async (email, password, fullName) => {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        if (fullName) {
+            await updateProfile(userCredential.user, {
+                displayName: fullName
+            });
+        }
+        return userCredential;
     },
 
     login: async (email, password) => {
@@ -36,6 +43,16 @@ const useAuthStore = create((set) => ({
 
     logout: async () => {
         return signOut(auth);
+    },
+
+    updateUserProfile: async (updates) => {
+        if (auth.currentUser) {
+            await updateProfile(auth.currentUser, updates);
+            // Force update local state
+            set({
+                currentUser: { ...auth.currentUser, ...updates }
+            });
+        }
     }
 }));
 

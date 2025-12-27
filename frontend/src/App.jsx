@@ -8,19 +8,26 @@ import RegisterPatient from "./pages/RegisterPatient";
 import Patients from "./pages/Patients";
 import PatientDetails from "./pages/PatientDetails";
 import React from "react";
+import ChatbotInterface from "./components/ChatbotInterface";
 import LandingPage from "./pages/LandingPage";
 import DoctorProfile from "./pages/DoctorProfile";
+import LoadingScreen from "./components/LoadingScreen";
 
 function App() {
-  const { initializeAuth } = useAuthStore();
+  const { initializeAuth, loading } = useAuthStore();
 
   useEffect(() => {
     const unsubscribe = initializeAuth();
     return () => unsubscribe();
   }, [initializeAuth]);
 
+  if (loading) {
+    return <LoadingScreen />;
+  }
+
   return (
     <Router>
+      <ChatbotInterface />
       <Routes>
         {/* Public Routes */}
         <Route path="/" element={<LandingPage />} />

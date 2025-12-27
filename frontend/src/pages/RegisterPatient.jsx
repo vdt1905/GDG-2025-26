@@ -83,7 +83,7 @@ export default function RegisterPatient() {
                                 type="text"
                                 name="name"
                                 required
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.name}
                                 onChange={handleChange}
                             />
@@ -95,7 +95,7 @@ export default function RegisterPatient() {
                                 type="date"
                                 name="dob"
                                 required
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.dob}
                                 onChange={handleChange}
                             />
@@ -105,7 +105,7 @@ export default function RegisterPatient() {
                             <label className="block text-sm font-semibold text-slate-700 mb-1">Blood Group</label>
                             <select
                                 name="bloodGroup"
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none bg-white"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.bloodGroup}
                                 onChange={handleChange}
                             >
@@ -119,7 +119,7 @@ export default function RegisterPatient() {
                             <label className="block text-sm font-semibold text-slate-700 mb-1">Gender</label>
                             <select
                                 name="gender"
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none bg-white"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.gender}
                                 onChange={handleChange}
                             >
@@ -134,7 +134,7 @@ export default function RegisterPatient() {
                             <input
                                 type="email"
                                 name="email"
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.email}
                                 onChange={handleChange}
                             />
@@ -144,7 +144,7 @@ export default function RegisterPatient() {
                             <input
                                 type="tel"
                                 name="phone"
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.phone}
                                 onChange={handleChange}
                             />
@@ -155,7 +155,7 @@ export default function RegisterPatient() {
                             <textarea
                                 name="history"
                                 rows="3"
-                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 outline-none text-slate-900 placeholder:text-slate-400 bg-white"
                                 value={formData.history}
                                 onChange={handleChange}
                             ></textarea>

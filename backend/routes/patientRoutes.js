@@ -19,6 +19,9 @@ router.post("/",
     createPatient
 );
 router.post("/:id/images", upload.single("image"), require("../controllers/patientController").addPatientImage);
+router.post("/analyze", require("../controllers/patientController").analyzeSkinImage);
+router.delete("/:id/images", require("../controllers/patientController").deletePatientImage);
+router.delete("/:id", require("../controllers/patientController").deletePatient);
 router.get("/:id", getPatientById);
 
 module.exports = router;

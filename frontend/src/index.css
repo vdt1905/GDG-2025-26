@@ -3,21 +3,28 @@
 /* Custom Premium Styles */
 :root {
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  
-  /* Modern Palette - Medical/Clean/Premium */
-  --color-primary: #0f766e; /* Teal 700 */
-  --color-primary-light: #2dd4bf; /* Teal 400 */
-  --color-secondary: #0ea5e9; /* Sky 500 */
-  --color-bg-dark: #0f172a; /* Slate 900 */
-  --color-card-dark: #1e293b; /* Slate 800 */
-  --color-text-light: #f1f5f9; /* Slate 100 */
-  --color-text-dim: #94a3b8; /* Slate 400 */
+
+  /* Cyber-Medical Palette */
+  --color-primary: #10b981;
+  /* Emerald 500 */
+  --color-primary-light: #34d399;
+  /* Emerald 400 */
+  --color-primary-dark: #047857;
+  /* Emerald 700 */
+  --color-bg-dark: #050b0a;
+  /* Deep Charcoal */
+  --color-card-dark: #0a1210;
+  /* Darker Glass */
+  --color-text-light: #ecfdf5;
+  /* Emerald 50 */
+  --color-text-dim: #03120c;
+  /* Emerald 300 (dimmed) */
 }
 
 body {
   font-family: var(--font-sans);
-  background-color: #f8fafc;
-  color: #1e293b;
+  background-color: #050b0a;
+  color: #ecfdf5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -37,8 +44,15 @@ body {
 
 /* Animations */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .animate-fade-in {
@@ -50,6 +64,7 @@ body {
   background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
   transition: all 0.3s ease;
 }
+
 .btn-primary:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 15px -3px rgba(14, 165, 233, 0.3);
@@ -59,13 +74,16 @@ body {
 ::-webkit-scrollbar {
   width: 8px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
   border-radius: 4px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
