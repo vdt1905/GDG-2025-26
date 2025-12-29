@@ -8,13 +8,12 @@ scikit-learn
 torch
 torchvision
 Pillow
-pymongo
+firebase-admin
 asyncio
 textwrap3
 arxiv
-groq
+google-adk
 google-genai
-agno
 duckduckgo-search
 pypdf
 pydantic

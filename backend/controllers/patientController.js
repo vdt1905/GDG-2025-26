@@ -1,5 +1,6 @@
 const { db } = require("../config/firebaseAdmin");
 const cloudinary = require("../config/cloudinaryConfig");
+const axios = require('axios');
 
 // Get all patients for the logged-in doctor
 const getPatients = async (req, res) => {
@@ -159,61 +160,61 @@ const addPatientImage = async (req, res) => {
     }
 };
 
-// Analyze skin image (Mock AI)
+// Analyze skin image (Real AI via Python Service)
 const analyzeSkinImage = async (req, res) => {
     try {
-        const { imageUrl } = req.body;
-        if (!imageUrl) {
-            return res.status(400).json({ error: "Image URL is required" });
+        const { patientId, imageUrl } = req.body;
+
+        console.log("Analyzing for patient:", patientId);
+        if (imageUrl) console.log("Specific Image URL provided:", imageUrl);
+
+        if (!patientId) {
+            return res.status(400).json({ error: "Patient ID is required for analysis" });
         }
 
-        console.log("Analyzing image:", imageUrl);
+        // Call Python Service
+        const payload = { obj_id: patientId };
+        if (imageUrl) payload.imageUrl = imageUrl;
 
-        // Simulate AI Processing Delay
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        const pythonResponse = await axios.post('http://127.0.0.1:6700/predict', payload);
 
-        // Mock Result
-        const diseases = [
-            { name: "Melanoma", severity: "High", description: "A serious form of skin cancer that begins in the cells known as melanocytes." },
-            { name: "Basal Cell Carcinoma", severity: "Medium", description: "A type of skin cancer that begins in the basal cells." },
-            { name: "Eczema (Atopic Dermatitis)", severity: "Low", description: "A condition that makes your skin red and itchy." },
-            { name: "Psoriasis", severity: "Medium", description: "A condition in which skin cells build up and form scales and itchy, dry patches." },
-            { name: "Benign Keratosis", severity: "Low", description: "A non-cancerous skin growth that appears waxy, brown, black, or tan." }
-        ];
+        const pythonData = pythonResponse.data;
 
-        const randomDisease = diseases[Math.floor(Math.random() * diseases.length)];
-        const confidence = (Math.random() * (0.99 - 0.75) + 0.75).toFixed(2); // Random confidence between 75% and 99%
+        // Python returns: 
+        // { prediction: "Disease,Confidence,Remarks", report: "Markdown...", ... }
 
-        const report = `
-**DERMATOLOGICAL ANALYSIS REPORT**
---------------------------------
-**Date:** ${new Date().toLocaleDateString()}
-**Image Source:** Uploaded Scan
+        // Parse Prediction String
+        const predParts = pythonData.prediction.split(',');
+        let diagnosis = "Unknown";
+        let confidence = "0";
+        let remarks = "";
 
-**DIAGNOSIS:** ${randomDisease.name}
-**CONFIDENCE SCORE:** ${(confidence * 100).toFixed(1)}%
-**SEVERITY:** ${randomDisease.severity}
+        if (predParts.length >= 2) {
+            diagnosis = predParts[0].trim();
+            confidence = predParts[1].trim().replace('%', '');
+            remarks = predParts.slice(2).join(',').trim();
+        }
 
-**DESCRIPTION:**
-${randomDisease.description}
-
-**RECOMMENDED ACTIONS:**
-1. Clinical correlation suggested.
-2. ${randomDisease.severity === 'High' ? 'Urgent biopsy recommended.' : 'Monitor for changes in size, shape, or color.'}
-3. Follow-up usage of sunscreen and protective clothing.
-
-*Disclaimer: This is an AI-generated analysis and does not replace professional medical advice.*
-        `;
-
+        // Send response merging Python data with what frontend expects
         res.json({
-            diagnosis: randomDisease.name,
-            confidence: confidence,
-            severity: randomDisease.severity,
-            report: report.trim()
+            diagnosis: diagnosis,
+            confidence: (parseFloat(confidence) / 100).toFixed(2), // Normalize to 0-1 if frontend expects that, or keep as %
+            severity: "Check Report", // Python doesn't return severity in CSV, so we refer to report
+            report: pythonData.report,
+            jarvis_notes: pythonData.jarvis,
+            // Critical passthrough fields for Preview Modal:
+            verify: pythonData.verify,
+            prediction: pythonData.prediction,
+            imageUrl: pythonData.imageUrl,
+            timestamp: { _seconds: Math.floor(Date.now() / 1000) } // Fake Firestore timestamp format for consistency
         });
 
     } catch (error) {
-        console.error("Analysis failed:", error);
+        console.error("Analysis failed:", error.message);
+        if (error.response) {
+            console.error("Python Server Error:", error.response.data);
+            return res.status(error.response.status).json({ error: "AI Service Error: " + JSON.stringify(error.response.data) });
+        }
         res.status(500).json({ error: "Failed to analyze image" });
     }
 };
@@ -254,6 +255,24 @@ const deletePatientImage = async (req, res) => {
     }
 };
 
+// Get Patient Reports
+const getPatientReports = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const reportsRef = db.collection("patients").doc(id).collection("reports");
+        const snapshot = await reportsRef.orderBy("timestamp", "desc").get();
+
+        const reports = [];
+        snapshot.forEach((doc) => {
+            reports.push({ id: doc.id, ...doc.data() });
+        });
+
+        res.status(200).json(reports);
+    } catch (error) {
+        res.status(500).json({ message: "Error fetching reports", error: error.message });
+    }
+};
+
 module.exports = {
     getPatients,
     createPatient,
@@ -261,6 +280,7 @@ module.exports = {
     addPatientImage,
     analyzeSkinImage,
     deletePatient,
-    deletePatientImage
+    deletePatientImage,
+    getPatientReports
 };
 

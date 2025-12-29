@@ -18,7 +18,7 @@ CLASS_NAMES = [
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = SkinDiseaseCNN(num_classes=9).to(device)
-model.load_state_dict(torch.load(r"./models/skin_disease_model.pth", map_location=device))
+model.load_state_dict(torch.load(r"./models/skin_disease_model.pth", map_location=device, weights_only=False))
 model.eval()
 
 transform = transforms.Compose([

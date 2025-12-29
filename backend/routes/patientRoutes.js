@@ -23,5 +23,6 @@ router.post("/analyze", require("../controllers/patientController").analyzeSkinI
 router.delete("/:id/images", require("../controllers/patientController").deletePatientImage);
 router.delete("/:id", require("../controllers/patientController").deletePatient);
 router.get("/:id", getPatientById);
+router.get("/:id/reports", require("../controllers/patientController").getPatientReports);
 
 module.exports = router;

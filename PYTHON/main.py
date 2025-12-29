@@ -6,30 +6,101 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import requests
 from io import BytesIO
-from bson import ObjectId
-
 from pydantic import BaseModel
-
 from dotenv import load_dotenv
-from textwrap import dedent
-from agno.agent import Agent, RunResponse
-from agno.models.google import Gemini
-from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.media import Image as AgnoImage
-from agno.models.groq import Groq
-from agno.tools.arxiv import ArxivTools
-from agno.tools.duckduckgo import DuckDuckGoTools
-from pymongo import MongoClient
+from typing import Optional
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+
+import google.generativeai as genai
 
 load_dotenv()
 
-MONGO_URI=os.getenv("MONGO_URI")
+# Firebase Initialization
+cred_path = os.path.join("..", "backend", "serviceAccountKey.json")
+try:
+    cred = credentials.Certificate(cred_path)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("Firebase Admin Initialized")
+except Exception as e:
+    print(f"Error initializing Firebase: {e}")
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# Aggressive retry implementation for API calls
+import time
+import random
+
+# List of models to try in order of preference (Fastest/Cost-effective -> Most Powerful -> Generic Fallbacks)
+FALLBACK_MODELS = [
+    # "gemini-2.0-flash-lite-preview-02-05", 
+    # "gemini-2.0-flash",                     
+    # "gemini-2.0-flash-lite",
+    # "gemini-2.0-flash-exp",
+    # "gemini-2.5-flash",         
+    "gemini-2.5-flash-lite",    
+    # "gemini-3-flash-preview",   
+    # "gemini-flash-latest",
+    # "gemini-pro-latest"
+]
+
+def generate_with_retry(prompt, generation_config, safety_settings, retries=3, delay=5):
+    """
+    Attempts to generate content using a list of fallback models.
+    If a model fails with a quota error (429) or not found (404), it moves to the next model.
+    """
+    last_exception = None
+    
+    for model_name in FALLBACK_MODELS:
+        print(f"Trying model: {model_name}...")
+        try:
+            # Instantiate model
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+            
+            # Attempt generation with internal retries for transient errors on the SAME model
+            for attempt in range(retries):
+                try:
+                    return model.generate_content(prompt)
+                except Exception as e:
+                    error_str = str(e)
+                    # If it's a hard error like 404 (Not Found) or 429 (Quota), break inner loop to switch model
+                    if "404" in error_str or "429" in error_str or "Quota exceeded" in error_str or "ResourceExhausted" in error_str:
+                         print(f"Model {model_name} failed with Quota/Found error: {e}")
+                         raise e # Re-raise to trigger model switch
+                    
+                    # For other errors (500, etc), wait and retry same model
+                    if attempt < retries - 1:
+                        wait_time = delay * (2 ** attempt) + random.uniform(0, 5)
+                        print(f"Transient Error ({e}) on {model_name}. Retrying in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                    else:
+                        raise e # Failed all retries for this model
+            
+        except Exception as e:
+            last_exception = e
+            print(f"Switching from {model_name} due to error...")
+            continue # Try next model in list
+            
+    # If we exhaust all models
+    print(f"All models failed. Last error: {last_exception}")
+    raise last_exception
 
 class Id(BaseModel):
     obj_id: str
+    imageUrl: Optional[str] = None
 
-
-
+class Query(BaseModel):
+    query: str
+    deep_search: bool = False
 
 app = FastAPI()
 app.add_middleware(
@@ -39,67 +110,79 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the ShrushrutAI"}
 
 @app.post("/predict")
-def classify_image(req: Id):
+async def classify_image(req: Id):
     obj_id = req.obj_id
-    try:
-        client=MongoClient(MONGO_URI)
-        db = client["test"]  
-        collection = db["predicts"] 
+
+    # Priority 1: Use specific image URL
+    if req.imageUrl and req.imageUrl.strip():
+        image_url = req.imageUrl
+        print(f"Using provided image URL: {image_url}")
+    else:
+        # Priority 2: Fallback to latest
         def get_latest_skin_image(obj_id: str):
             try:
-                obj_id = ObjectId(obj_id)  
-                document = collection.find_one({"patient": obj_id})  
-
-                if document:
-                    image_url = document.get("latestSkinImage")
-                    if image_url:
-                        print(image_url)  # Print the image URL
+                # Fetch patient document from Firestore
+                doc_ref = db.collection("patients").document(obj_id)
+                doc = doc_ref.get()
+                
+                if doc.exists:
+                    data = doc.to_dict()
+                    skin_images = data.get("skinImages", [])
+                    
+                    if skin_images and len(skin_images) > 0:
+                        image_url = skin_images[-1] # Get the last added image
+                        print(f"Found image URL: {image_url}")
                         return image_url
                     else:
-                        print("No image found in document")
+                        print("No images found in patient record")
                         return None
                 else:
-                    print("Document not found")
+                    print("Patient document not found")
                     return None
-
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error fetching from Firestore: {e}")
                 return None
 
         image_url = get_latest_skin_image(obj_id)
-        if not image_url:
-            raise HTTPException(status_code=404, detail="Image not found")
-        response = requests.get(image_url)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-        img_bytes = BytesIO()
-        image.save(img_bytes, format="PNG")
-        image_bytes = img_bytes.getvalue()
-        agno_image = AgnoImage(content=image_bytes, format="png")
-        verify_med_agent = Agent(
-            name="Medical Imaging Expert",
-            model=Gemini(id="gemini-2.0-flash-exp"),
-            tools=[DuckDuckGoTools()],
-            markdown=True,
-            instructions=dedent(
-                f"""Analyze the given skin image as an very good and expert dermatologist and expert to determine if the skin is healthy or unhealthy.
-                    - confidence percentage should be between 90 to 100 and you can use the decimal value also.
-                    - If healthy, classify it as 'Healthy' and provide the confidence level in percentage.
-                    - If unhealthy, classify it as 'Unhealthy' and provide the confidence level in percentage.
-                    - Additionally, determine the skin type as one of the following: 'Dry', 'Oily', or 'Normal'.
-                    - give answer in strictly <classification>,<confidence score in percent>,<skin type>,<remarks : give some remarks that is in one to two lines> format only.
-                    """
-            )
-        )
+    
+    if not image_url:
+        raise HTTPException(status_code=404, detail="Image not found")
 
-        result: RunResponse = verify_med_agent.run("Please analyze this medical image.", images=[agno_image])
+    try:
+        # Enhanced image fetching with headers and retry
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(image_url, headers=headers, timeout=10)
+                response.raise_for_status()
+                break # Success
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"Failed to fetch image after {max_retries} attempts: {e}")
+                    raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
+                print(f"Image fetch failed (attempt {attempt+1}/{max_retries}). Retrying...")
+                time.sleep(1)
+
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+
+        # Save image temporarily
+        temp_path = "temp_image.png"
+        image.save(temp_path)
+
+        # Get predictions from models
         result_c = predict_c(image)
         result_d = predict_d(image)
+
         if result_c["confidence"] > result_d["confidence"]:
             result_pred = result_c
             minor_result = result_d
@@ -107,230 +190,266 @@ def classify_image(req: Id):
             result_pred = result_d
             minor_result = result_c
         else:
-            result_pred = result_c        
-        unhealthy_skin_agent = Agent(
-            name="Medical Imaging Analysis Expert",
-            model=Gemini(id="gemini-2.0-flash-exp"),
-            tools=[DuckDuckGoTools()],
-            context={"verify": result.content},
-            add_context=True,
-            markdown=True,
-            instructions=dedent(
-                f"""Analyze the given skin image as an expert dermatologist.If the skin appears healthy, classify the prediction as it 'Healthy' and provide the confidence level. If unhealthy, use the model output to determine the disease. The prediction is by deep learning model is {result_pred}. If classified as one of the following: 'Actinic Keratosis', 'Atopic Dermatitis', 'Benign Keratosis', 'Dermatofibroma', 'Melanocytic Nevus', 'Melanoma', 'Squamous Cell Carcinoma', 'Tinea Ringworm Candidiasis', or 'Vascular Lesion', assess the likelihood of skin cancer other wise its a diesease. Provide the disease name, confidence level, and remarks. Additionally, include possible symptoms that might be present for further diagnostic evaluation.
-                - give answer in strictly <disease>,<confidence score in percent>,<remarks in two to three lines> format only.
-                - If the skin appears healthy, classify it as 'Healthy' and provide the confidence level in percentage.
-                """
-            )
+            result_pred = result_c
+            minor_result = result_d
+
+        generation_config = {
+            "temperature": 0.4,
+            "top_p": 1,
+            "top_k": 32,
+            "max_output_tokens": 1024,
+        }
+
+        safety_settings = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            },
+        ]
+
+     
+        # Agent 1: Verify Medical Agent
+        verify_prompt = """Analyze the given skin image as a very good and expert dermatologist to determine if the skin is healthy or unhealthy.
+- Provide a realistic confidence percentage based on visual clarity and distinct presentation of symptoms. Do NOT force it to be 100%.
+- If healthy, classify it as 'Healthy' and provide the confidence level in percentage.
+- If unhealthy, classify it as 'Unhealthy' and provide the confidence level in percentage.
+- Additionally, determine the skin type as one of the following: 'Dry', 'Oily', or 'Normal'.
+- give answer in strictly <classification>,<confidence score in percent>,<skin type>,<remarks : give some remarks that is in one to two lines> format only."""
+        
+        # Open image again for Gemini
+        img = Image.open(temp_path)
+        
+        verify_response = generate_with_retry(
+            prompt=[verify_prompt, img],
+            generation_config=generation_config,
+            safety_settings=safety_settings
         )
-        pred: RunResponse = unhealthy_skin_agent.run("Please analyze this medical image.", images=[agno_image])
-        diag_collection = db["diag"] 
-        diag_collection.replace_one({}, {"pred": pred.content}, upsert=True)
+        verify_content = verify_response.text
 
-        report_agent = Agent(
-            name="Medical Imaging Analysis and report generator Expert",
-            model=Gemini(id="gemini-2.0-flash-exp"),
-            tools=[DuckDuckGoTools()],
-            context={"pred": pred.content},
-            add_context=True,
-            markdown=True,
-            instructions=dedent(f"""# Skin Disease Diagnosis Report 🏥  
-                                If the skin classification is unhealthy then in report also add the our model predicted that  {pred.content}  but it also give two answer                         
-## Step 1: Image Technical Assessment  
+        # Agent 2: Unhealthy Skin Agent
+        unhealthy_prompt = f"""Analyze the given skin image as an expert dermatologist. If the skin appears healthy, classify the prediction as 'Healthy' and provide the confidence level. If unhealthy, use the model output to determine the disease. The prediction by deep learning model is {result_pred}. If classified as one of the following: 'Actinic Keratosis', 'Atopic Dermatitis', 'Benign Keratosis', 'Dermatofibroma', 'Melanocytic Nevus', 'Melanoma', 'Squamous Cell Carcinoma', 'Tinea Ringworm Candidiasis', or 'Vascular Lesion', assess the likelihood of skin cancer otherwise its a disease. Provide the disease name, confidence level, and remarks. Additionally, include possible symptoms that might be present for further diagnostic evaluation.
 
-### 1.1 Imaging & Quality Review  
-- Imaging Modality Identification: (Dermatoscopic, Clinical, Histopathological, etc.)  
-- Anatomical Region & Patient Positioning: (Specify if available)  
-- Image Quality Evaluation: (Contrast, Clarity, Presence of Artifacts)  
-- Technical Adequacy for Diagnostic Purposes: (Yes/No, with reasoning)  
+Context from previous analysis: {verify_content}
 
-### 1.2 Professional Dermatological Analysis  
-- Systematic Anatomical Review  
-- Primary Findings: (Lesion Size, Shape, Texture, Color, etc.)  
-- Secondary Observations (if applicable)  
-- Anatomical Variants or Incidental Findings  
-- Severity Assessment: (Normal / Mild / Moderate / Severe)  
+- give answer in strictly <disease>,<confidence score in percent>,<remarks in two to three lines> format only.
+- If the skin appears healthy, classify it as 'Healthy' and provide the confidence level in percentage."""
 
----
+        pred_response = generate_with_retry(
+            prompt=[unhealthy_prompt, img],
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        pred_content = pred_response.text
 
-## Step 2: Context-Specific Diagnosis & Clinical Interpretation  
-- Primary Diagnosis: (Detailed interpretation based on the given disease context)  
-- Secondary Condition (if suspected): (Mention briefly without shifting focus)  
+        # Intermediate save removed to prevent duplicates - we save everything at the end now.
 
----
 
-## Step 3: Recommended Next Steps  
-- Home Remedies & Skincare: (Moisturizing, Avoiding Triggers, Hydration)  
-- Medications & Treatments: (Antifungal, Antibiotic, Steroid Creams, Oral Medications)  
-- When to See a Doctor: (Persistent Symptoms, Spreading, Bleeding, Painful Lesions)  
-- Diagnostic Tests (if required): (Skin Biopsy, Allergy Tests, Blood Tests)  
+        # Extract filename from URL for report
+        image_name = image_url.split('/')[-1] if image_url else "Unknown"
 
----
+        # Agent 3: Report Agent
 
-## Step 4: Patient Education  
-- Clear, Jargon-Free Explanation of Findings  
-- Visual Analogies & Simple Diagrams (if helpful)  
-- Common Questions Addressed  
-- Lifestyle Implications (if any)  
+        report_prompt = f"""
+        Act as a senior consultant dermatologist. Generate a highly detailed and comprehensive medical report for the following case.
+        
+        **Patient Analysis Context:**
+        - Suspected Condition: {result_pred['class']} (Confidence: {result_pred['confidence']:.2f})
+        - Secondary Possibility: {minor_result['class']} (Confidence: {minor_result['confidence']:.2f})
+        - Initial Assessment: {verify_content}
+        
+        **Required Report Structure (Use Markdown):**
 
----
+        ### 1. Detailed Clinical Observations
+        - Describe lesion morphology (size, color, texture, borders).
+        - Note anatomical location and distribution patterns.
+        - Mention any visible signs of inflammation, scaling, or ulceration.
 
-## Step 5: Ayurvedic or Home Solutions  
-(Applied only if the condition is non-cancerous or mild and use web search)  
-- Dry & Irritated Skin: Apply Aloe Vera gel, **Coconut oil, or **Ghee for deep moisturization.  
-- Inflammation & Redness: Use a paste of Sandalwood (Chandan) and Rose water for cooling effects.  
-- Fungal & Bacterial Infections: Apply Turmeric (Haldi) paste with honey or Neem leaves for antimicrobial benefits.  
-- Eczema & Psoriasis: Drink Giloy (Guduchi) juice and use a paste of Manjistha & Licorice (Yashtimadhu) for skin detox.  
+        ### 2. Differential Diagnosis & Reasoning
+        - **Primary Diagnosis**: Explain why {result_pred['class']} is the most likely diagnosis based on visual evidence.
+        - **Differentials**: List 2-3 other conditions that share similar features but are less likely, and explain why.
 
----
+        ### 3. Pathophysiology (Brief)
+        - Explain the underlying biological mechanism of the primary condition.
 
-## Step 6: Evidence-Based Context & References  
-🔬 Using DuckDuckGo search and provide relevent links:  
-- Recent relevant medical literature  
-- Standard treatment guidelines  
-- Similar case studies  
-- Technological advances in imaging/treatment  
-- 2-3 authoritative medical references
-- give related links also with references.  
+        ### 4. Comprehensive Management Plan
+        - **Pharmacological**: Suggest specific generic classes of topical/oral medications (e.g., "Topical corticosteroids", "Antifungals").
+        - **Lifestyle & Hygiene**: Specific advice on skincare, diet, and triggers.
+        - **Home Care**: Actionable steps for the patient.
 
----
+        ### 5. Prognosis & Follow-up
+        - Expected course of the condition.
+        - Warning signs that require immediate medical attention.
 
-## Final Summary & Conclusion  
-📌 Key Takeaways:  
-- Most Likely Diagnosis: (Brief summary)  
-- Recommended Actions: (Main steps for treatment and next consultation)  
-The most likely condition the patient could have is **{result_pred['class']}** with a confidence of {result_pred['confidence']:.2f}. 
-Additionally, there is a minor possibility of **{minor_result['class']}** with a confidence of {minor_result['confidence']:.2f}. 
+        **Tone:** Professional, clinical, and empathetic.
+        **Format:** strictly markdown, no preamble.
+        """
 
-**Remarks:**  
-- **{result_pred['class']}** (Confidence: {result_pred['confidence']:.2f}) is the primary concern and should be prioritized for diagnosis and treatment.  
+        report_response = generate_with_retry(
+            prompt=[report_prompt, img],
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+        report_content = report_response.text
+
+        # Agent 4: Jarvis Agent
+        jarvis_prompt = f"""You are an AI-powered Dermatology Voice Assistant, designed to provide expert-level support to dermatologists. Your role is to analyze report {report_content} recommend evidence-based treatments, and guide doctors on the next steps using the latest research and drug discoveries.
+
+The most likely condition the patient could have is **{result_pred['class']}** with a confidence of {result_pred['confidence']:.2f}.
+Additionally, there is a minor possibility of **{minor_result['class']}** with a confidence of {minor_result['confidence']:.2f}.
+
+**Remarks:**
+- **{result_pred['class']}** (Confidence: {result_pred['confidence']:.2f}) is the primary concern and should be prioritized for diagnosis and treatment.
 - **{minor_result['class']}** (Confidence: {minor_result['confidence']:.2f}) may be a secondary condition or share similar symptoms. Further medical evaluation is recommended to rule it out.
-Note: This report is AI-generated and should not replace professional medical consultation. Always consult a dermatologist for a confirmed diagnosis and personalized treatment.  
- - give answer in proper markdown format.
 
----
-""")
+### 1️⃣ Understand & Analyze the Case
+- Listen to the doctor's query about a patient's condition.
+- Identify the disease or condition being discussed.
+- Analyze symptoms, affected areas, and disease progression based on the given context or medical report.
+
+### 2️⃣ Provide the Latest Treatment Recommendations
+- Fetch current treatment guidelines, FDA-approved drugs, and clinical trials using web sources.
+- Explain the best available treatment options, including topical, oral, biologic, and advanced therapies.
+- Compare traditional treatments with newly discovered therapies (e.g., AI-assisted skin diagnostics, gene therapy, biologics).
+
+### 3️⃣ Generate a Complete Prescription Plan
+- Suggest medications, dosages, frequency, and possible side effects.
+- Recommend adjunct therapies, such as lifestyle modifications and skincare routines.
+- Warn about contraindications or potential drug interactions.
+
+### 4️⃣ Guide the Doctor on the Next Steps
+- Recommend further diagnostic tests (e.g., biopsy, dermoscopy, blood tests, genetic markers).
+- Suggest patient follow-up intervals and monitoring plans.
+- Provide guidelines for managing severe or resistant cases.
+
+### 5️⃣ Provide Reliable Medical Sources & Links
+- Fetch research-backed insights from trusted sources such as PubMed, JAMA Dermatology, The Lancet, FDA, and WHO.
+- Offer links to the latest studies, treatment guidelines, and clinical trials for validation.
+
+Context: {pred_content}
+
+Instructions should be understandable by Dermatologists not for layman audience and make it like a professional advice to doctor like doctor is giving advice to the other doctor and make complete instruction summarize and in 4 to 5 lines pointwise.
+- give answer in proper markdown format."""
+
+        jarvis_response = generate_with_retry(
+            prompt=jarvis_prompt,
+            generation_config=generation_config,
+            safety_settings=safety_settings
         )
-        report: RunResponse = report_agent.run("Please analyze this skin image output context and generate a proper report for Dermatologist to understand.", images=[agno_image])
-        net_agent = Agent(
-            name="Medical Imaging Expert",
-            model=Groq(id="qwen-2.5-32b"),
-            tools=[DuckDuckGoTools()],  
-            context={"pred": pred.content},
-            add_context=True,
-            markdown=True,  
-            instructions=dedent(
-                f"""You are an AI-powered Dermatology Voice Assistant, designed to provide expert-level support to dermatologists. Your role is to analyze report {report.content} recommend evidence-based treatments, and guide doctors on the next steps using the latest research and drug discoveries.  
-                The most likely condition the patient could have is **{result_pred['class']}** with a confidence of {result_pred['confidence']:.2f}. 
-                Additionally, there is a minor possibility of **{minor_result['class']}** with a confidence of {minor_result['confidence']:.2f}. 
+        jarvis_content = jarvis_response.text
 
-                **Remarks:**  
-                - **{result_pred['class']}** (Confidence: {result_pred['confidence']:.2f}) is the primary concern and should be prioritized for diagnosis and treatment.  
-                - **{minor_result['class']}** (Confidence: {minor_result['confidence']:.2f}) may be a secondary condition or share similar symptoms. Further medical evaluation is recommended to rule it out.
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
-                ### 1️⃣ Understand & Analyze the Case  
-                - Listen to the doctor’s query about a patient’s condition.  
-                - Identify the disease or condition being discussed.  
-                - Analyze symptoms, affected areas, and disease progression based on the given context or medical report.  
+        # Update the report with final generated content
+        try:
+            # Find the latest report we just added (using a query since we didn't save the ref ID, 
+            # or better yet, we should have saved the ref. But for now, let's just add a new one or update latest)
+            # Actually, let's just do a fire-and-forget update to the latest document we *should* have tracked.
+            # To be safe and simple: let's just write EVERYTHING at the end instead of the middle.
+            
+            final_report_data = {
+                "patientId": obj_id,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "imageUrl": image_url,
+                "verify": verify_content,
+                "prediction": pred_content,
+                "report": report_content,
+                "jarvis": jarvis_content
+            }
+            
+            # Save to subcollection
+            db.collection("patients").document(obj_id).collection("reports").add(final_report_data)
+            
+            # Update latest context
+            db.collection("diagnoses").document("latest").set(final_report_data)
 
-                ### 2️⃣ Provide the Latest Treatment Recommendations  
-                - Fetch current treatment guidelines, FDA-approved drugs, and clinical trials using web sources.  
-                - Explain the best available treatment options, including **topical, oral, biologic, and advanced therapies.  
-                - Compare traditional treatments with newly discovered therapies (e.g., AI-assisted skin diagnostics, gene therapy, biologics).  
+        except Exception as e:
+            print(f"Error saving final report to Firestore: {e}")
 
-                ### 3️⃣ Generate a Complete Prescription Plan  
-                - Suggest medications, dosages, frequency, and possible side effects.  
-                - Recommend adjunct therapies, such as lifestyle modifications and skincare routines.  
-                - Warn about contraindications or potential drug interactions.  
+        return {
+            "imageUrl": image_url,
+            "verify": verify_content,
+            "prediction": pred_content,
+            "report": report_content,
+            "jarvis": jarvis_content
+        }
 
-                ### 4️⃣ Guide the Doctor on the Next Steps  
-                - Recommend further diagnostic tests (e.g., biopsy, dermoscopy, blood tests, genetic markers).  
-                - Suggest patient follow-up intervals and monitoring plans.  
-                - Provide guidelines for managing severe or resistant cases.  
-
-                ### 5️⃣ Provide Reliable Medical Sources & Links  
-                - Fetch research-backed insights from trusted sources such as PubMed, JAMA Dermatology, The Lancet, FDA, and WHO.  
-                - Offer links to the latest studies, treatment guidelines, and clinical trials for validation.  
-
-                ---
-
-                Instructions should be understandable by Dermatologists not for layman audience and make it like a proffesional advice to doctor like doctor is giving advice to the other doctor and make complete instruction summarize and in 4 to 5 lines pointwise.
-                - give answer in proper markdown format.
-
-                """)
-
-        )
-        jarvis: RunResponse = net_agent.run("Please analyze this skin based diagnostics report and give instructions to doctor")
-        return {"image_url": image_url, "verify": result.content, "prediction": pred.content,"report":report.content,"jarvis": jarvis.content}
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
-class Query(BaseModel):
-    query: str
-    deep_search: bool = False
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 @app.post("/ans")
-def get_ans(q: Query):
+async def get_ans(q: Query):
     try:
-        client=MongoClient(MONGO_URI)
-        db = client["test"]  
-        diag_collection = db["diag"] 
-        latest_entry = diag_collection.find_one({}, {"_id": 0})
-        mongo_pred = latest_entry["pred"]
-    except Exception as e:
-        w_agent = Agent(
-                name="Skin Diesease Research Expert",
-                model=Groq(id="qwen-2.5-32b"),
-                tools=[DuckDuckGoTools()],  
-                markdown=True,  
-                instructions=dedent(
-                    f"""Analyze the given question as an expert dermatologist. use web to get more insights and make sure that your answers are based on doctor point of view that a dermatologist should understand that.
-                    - give proper links and references.
-                    - very concise answer and short answer to the point of the question.
-                    - give answer in proper markdown format.
-                    """),
+        # Fetch latest diagnosis context from Firestore
+        doc_ref = db.collection("diagnoses").document("latest")
+        doc = doc_ref.get()
+        if doc.exists:
+            mongo_pred = doc.to_dict().get("pred", "")
+        else:
+            mongo_pred = ""
+    except Exception:
+        mongo_pred = ""
 
-            )
-        get_w_result: RunResponse = w_agent.run(q.query)
-        return {"response": get_w_result.content}
-    web_agent = Agent(
-            name="Skin Diesease Research Expert",
-            model=Groq(id="qwen-2.5-32b"),
-            tools=[DuckDuckGoTools()],  
-            context={"diagnosis": mongo_pred},
-            add_context=True,
-            markdown=True,  
-            instructions=dedent(
-                f"""Analyze the given question as an expert dermatologist. use web to get more insights and make sure that your answers are based on doctor point of view that a dermatologist should understand that.
-                 - guide the doctor with treatment and prescription plan for the diesease.
-                 - give proper links and references.
-                 - very concise answer and short answer to the point of the question.
-                 - give answer in proper markdown format.
-                   """),
+    generation_config = {
+        "temperature": 0.4,
+        "top_p": 1,
+        "top_k": 32,
+        "max_output_tokens": 1024,
+    }
 
-        )
-    deep_agent = Agent(
-            name="Skin Disease Research Expert",
-            model=Groq(id="qwen-2.5-32b"),
-            tools=[ArxivTools()],  
-            context={"pred_diagnostic": mongo_pred},
-            add_context=True,
-            markdown=True,  
-            instructions=dedent(
-                f"""Analyze the given question as an expert dermatologist. use Arxiv to get latest research and discoveries and make sure that your answers are based on doctor point of view that a dermatologist should understand that. and that provide the new treatment discoveries and latest research on treatment and drug that is done on the disease and how to treat it.
-                 - give proper links and references.
-                 - give answer in proper markdown format.
-                 - very concise answer and short answer to the point of the question.
-                 - if not context provided then just act as a professional Dermatologist and give the answer.
-                 - guide the doctor with treatment and prescription plan for the diesease.
-                   """),
+    safety_settings = [
+        {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "BLOCK_NONE"
+        },
+    ]
 
-        )
-    if q.deep_search:
-        get_deep_result: RunResponse = deep_agent.run(q.query)
-        return {"response": get_deep_result.content}
-    else:
-        get_web_result: RunResponse = web_agent.run(q.query)
-        return {"response": get_web_result.content}
-        
+    ans_prompt = f"""Analyze the given question as an expert dermatologist.
+Diagnosis context: {mongo_pred if mongo_pred else 'No context available'}.
+Question: {q.query}
+- Provide concise answer.
+- Include references."""
+
+    # Use global retry function with fallback support
+    response = generate_with_retry(
+        prompt=ans_prompt,
+        generation_config=generation_config,
+        safety_settings=safety_settings
+    )
+    return {"response": response.text}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run('main:app', host="127.0.0.1", port=6700, reload=True)

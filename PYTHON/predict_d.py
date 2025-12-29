@@ -19,7 +19,7 @@ def load_model(weights_path, num_classes):
         torch.nn.Linear(256, num_classes)
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_state_dict(torch.load(weights_path, map_location=device))
+    model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=False))
     model.to(device)
     model.eval()
     return model
