@@ -30,8 +30,8 @@ export default function Navbar({ toggleSidebar, isSidebarCollapsed }) {
                     whileTap={{ scale: 0.95 }}
                     className="relative p-2 rounded-full hover:bg-slate-100 text-slate-500/80 hover:text-emerald-600 transition-colors"
                 >
-                    <Bell className="w-5 h-5" />
-                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border border-white"></span>
+                
+                 
                 </motion.button>
 
                 {/* Doctor Profile (Right) - Now Clickable */}

@@ -346,7 +346,8 @@ Instructions should be understandable by Dermatologists not for layman audience 
             # We can save simpler version or full version
             db.collection("diagnoses").document("latest").set({
                 "pred": pred_content,
-                "report": report_content
+                "report": report_content,
+                "jarvis": jarvis_content
             }, merge=True)
 
         except Exception as e:
@@ -378,7 +379,11 @@ async def get_ans(q: Query):
         mongo_pred = ""
         if doc.exists:
             data = doc.to_dict()
-            mongo_pred = data.get("pred", "") + "\n\n" + data.get("report", "")
+            mongo_pred = (
+                f"Diagnosis: {data.get('pred', '')}\n\n"
+                f"Detailed Report: {data.get('report', '')}\n\n"
+                f"Expert Recommendations (Jarvis): {data.get('jarvis', '')}"
+            )
     except Exception:
         mongo_pred = ""
 

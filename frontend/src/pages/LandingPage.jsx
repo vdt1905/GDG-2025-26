@@ -10,7 +10,8 @@ import {
   MoveRight,
   FileText,
   Activity,
-  CheckCircle2
+  CheckCircle2,
+  Sparkles
 } from 'lucide-react';
 import useAuthStore from '../store/authStore';
 
@@ -42,17 +43,23 @@ const LandingPage = () => {
           <span className="text-lg font-bold tracking-tight text-slate-900">Shushrut<span className="text-teal-600">AI</span></span>
         </div>
 
-        <div className="hidden md:flex gap-8 text-xs font-semibold uppercase tracking-widest text-slate-500">
-          <a href="#" className="hover:text-teal-700 transition-colors">Methodology</a>
-          <a href="#" className="hover:text-teal-700 transition-colors">Clinical Trials</a>
-          <a href="#" className="hover:text-teal-700 transition-colors">Compliance</a>
-        </div>
 
-        <Link to={currentUser ? "/dashboard" : "/login"}>
-          <button className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest px-5 py-2.5 bg-white border border-slate-200 rounded-lg hover:border-teal-600 hover:text-teal-700 transition-all shadow-sm hover:shadow-md">
-            {currentUser ? "Access Portal" : "Practitioner Login"} <MoveRight size={14} />
-          </button>
-        </Link>
+
+        <div className="flex gap-4">
+          <Link to="/future-aspect">
+            <button className="relative overflow-hidden flex items-center gap-2 text-xs font-bold uppercase tracking-widest px-6 py-2.5 bg-slate-900 border border-teal-500/30 text-white rounded-lg group hover:scale-105 transition-all duration-300 shadow-[0_0_20px_rgba(20,184,166,0.3)] hover:shadow-[0_0_30px_rgba(20,184,166,0.6)]">
+              <div className="absolute inset-0 bg-gradient-to-r from-teal-500/20 to-cyan-500/20 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+              <Sparkles size={14} className="text-teal-400 group-hover:rotate-12 transition-transform" />
+              <span className="relative z-10 bg-gradient-to-r from-teal-200 to-cyan-200 bg-clip-text text-transparent group-hover:text-white transition-colors">Future Aspect</span>
+            </button>
+          </Link>
+
+          <Link to={currentUser ? "/dashboard" : "/login"}>
+            <button className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest px-5 py-2.5 bg-white border border-slate-200 rounded-lg hover:border-teal-600 hover:text-teal-700 transition-all shadow-sm hover:shadow-md">
+              {currentUser ? "Access Portal" : "Practitioner Login"} <MoveRight size={14} />
+            </button>
+          </Link>
+        </div>
       </nav>
 
       {/* Main Clinical Canvas */}
@@ -61,9 +68,7 @@ const LandingPage = () => {
         {/* Hero Section: Editorial Style */}
         <div className="lg:w-1/2 flex flex-col justify-center space-y-8 z-10">
           <motion.div {...fadeIn}>
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-teal-50 border border-teal-100 rounded-full text-[10px] font-bold uppercase tracking-[0.15em] text-teal-700 mb-6">
-              <span className="w-2 h-2 rounded-full bg-teal-500 animate-pulse" /> v2.0 Live Protocol
-            </div>
+
             <h1 className="text-5xl lg:text-7xl font-medium tracking-tight leading-[1] text-slate-900 mb-6">
               Precision <span className="text-teal-700 font-serif italic">Dermatology</span> <br />
               Powered by Neural Vision.
@@ -71,7 +76,7 @@ const LandingPage = () => {
           </motion.div>
 
           <motion.p {...fadeIn} transition={{ delay: 0.1 }} className="text-base lg:text-lg text-slate-500 max-w-lg leading-relaxed font-medium">
-            Medical-grade diagnostic infrastructure. Integrating computer vision with clinical workflows for 99.2% accuracy in epidermal pathology detection.
+            Agentic AI + DL as a tool powered end to end dermatology platform
           </motion.p>
 
           <motion.div {...fadeIn} transition={{ delay: 0.2 }} className="flex flex-wrap gap-4 items-center">
@@ -80,17 +85,11 @@ const LandingPage = () => {
                 Initialize Analysis
               </button>
             </Link>
-            <button className="px-8 py-4 bg-white border border-slate-200 text-slate-700 text-xs font-bold uppercase tracking-[0.15em] rounded-xl hover:bg-slate-50 hover:border-teal-200 hover:text-teal-700 transition-all">
-              View Clinical Data
-            </button>
+
           </motion.div>
 
           {/* Clinical Stats - Compact Row */}
-          <motion.div {...fadeIn} transition={{ delay: 0.3 }} className="pt-8 flex gap-12 border-t border-slate-200/60 mt-4">
-            <Stat label="Model Accuracy" value="99.2%" />
-            <Stat label="Speed" value="< 1.5s" />
-            <Stat label="Dataset" value="1.2M+" />
-          </motion.div>
+
         </div>
 
         {/* Right Section: The "Patient Case" Mockup - Redesigned */}
@@ -98,7 +97,7 @@ const LandingPage = () => {
           initial={{ opacity: 0, scale: 0.95, x: 20 }}
           animate={{ opacity: 1, scale: 1, x: 0 }}
           transition={{ duration: 0.8, ease: "easeOut", delay: 0.2 }}
-          className="lg:w-1/2 h-full max-h-[600px] flex items-center justify-center lg:justify-end relative"
+          className="lg:w-1/2 h-full max-h-[600px] flex items-center justify-center lg:justify-center relative"
         >
           {/* Tablet/Card Container */}
           <div className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl shadow-slate-200/50 border border-slate-100 overflow-hidden ring-4 ring-slate-50 z-20">
@@ -185,7 +184,7 @@ const LandingPage = () => {
           </div>
 
           {/* Floating Elements for depth */}
-          <motion.div
+          {/* <motion.div
             animate={{ y: [0, -10, 0] }}
             transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
             className="absolute -right-8 top-20 bg-white p-4 rounded-xl shadow-xl border border-slate-100 z-30 hidden lg:block"
@@ -193,10 +192,18 @@ const LandingPage = () => {
             <FileText className="text-teal-600 mb-2" size={20} />
             <div className="h-1 w-12 bg-slate-100 rounded mb-1" />
             <div className="h-1 w-8 bg-slate-100 rounded" />
-          </motion.div>
+          </motion.div> */}
         </motion.div>
       </main>
-    </div>
+
+
+      {/* Footer */}
+      <footer className="absolute bottom-2 w-full text-center py-2 z-50 pointer-events-none">
+        <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold opacity-60">
+          © {new Date().getFullYear()} Team Dominators
+        </p>
+      </footer>
+    </div >
   );
 };
 

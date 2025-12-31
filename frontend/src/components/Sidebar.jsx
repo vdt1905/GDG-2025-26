@@ -1,8 +1,9 @@
 import { Link, useLocation } from "react-router-dom";
 import useAuthStore from "../store/authStore";
-import { LayoutDashboard, Users, UserPlus, LogOut, Activity } from "lucide-react";
+import { LayoutDashboard, Users, UserPlus, LogOut, Activity, Sparkles } from "lucide-react";
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
+
 
 export default function Sidebar({ isCollapsed }) {
     const logout = useAuthStore((state) => state.logout);
@@ -38,7 +39,11 @@ export default function Sidebar({ isCollapsed }) {
                             exit={{ opacity: 0, width: 0 }}
                             className="overflow-hidden whitespace-nowrap"
                         >
-                            <span className="text-xl font-bold text-teal-700 block">Shushrut</span>
+                            <Link to="/">
+                                <span className="text-xl font-bold text-teal-700 block cursor-pointer">
+                                    Shushrut
+                                </span>
+                            </Link>
                             <p className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Derm Portal</p>
                         </motion.div>
                     )}
@@ -57,8 +62,8 @@ export default function Sidebar({ isCollapsed }) {
                         >
                             <motion.div
                                 className={`flex items-center gap-3 px-3 py-3 rounded-xl transition-all relative z-10 ${active
-                                        ? "text-teal-700 font-bold"
-                                        : "text-slate-500 hover:text-slate-900 font-medium"
+                                    ? "text-teal-700 font-bold"
+                                    : "text-slate-500 hover:text-slate-900 font-medium"
                                     } ${isCollapsed ? "justify-center" : ""}`}
                             >
                                 <item.icon className={`relative z-10 transition-colors ${active ? "w-6 h-6" : "w-5 h-5 group-hover:text-teal-600"}`} />

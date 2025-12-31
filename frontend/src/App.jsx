@@ -11,6 +11,7 @@ import React from "react";
 import ChatbotInterface from "./components/ChatbotInterface";
 import LandingPage from "./pages/LandingPage";
 import DoctorProfile from "./pages/DoctorProfile";
+import FutureAspect from "./pages/FutureAspect";
 import LoadingScreen from "./components/LoadingScreen";
 
 function App() {
@@ -40,6 +41,7 @@ function App() {
           <Route path="/patients" element={<Patients />} />
           <Route path="/register-patient" element={<RegisterPatient />} />
           <Route path="/patients/:id" element={<PatientDetails />} />
+          <Route path="/future-aspect" element={<FutureAspect />} />
         </Route>
 
       </Routes>

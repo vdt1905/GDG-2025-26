@@ -4,8 +4,10 @@ import React, { useEffect, useState } from "react";
 import api from "../lib/axios";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
+import useAuthStore from "../store/authStore";
 
 export default function Dashboard() {
+    const { currentUser } = useAuthStore();
     const [patients, setPatients] = useState([]);
     const [loading, setLoading] = useState(true);
     const [stats, setStats] = useState([
@@ -86,7 +88,7 @@ export default function Dashboard() {
                         <h1 className="text-4xl md:text-5xl font-black tracking-tight mb-4 leading-tight text-slate-900">
                             Good {new Date().getHours() < 12 ? "Morning" : new Date().getHours() < 18 ? "Afternoon" : "Evening"}, <br />
                             <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-teal-500">
-                                Doctor.
+                                {currentUser?.displayName ? currentUser.displayName : "Doctor"}.
                             </span>
                         </h1>
                         <p className="text-slate-500 text-lg max-w-xl font-medium">

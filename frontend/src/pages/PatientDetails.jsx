@@ -3,7 +3,7 @@ import Layout from "../components/Layout";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import useAuthStore from "../store/authStore";
 import api from "../lib/axios";
-import { ArrowLeft, Calendar, Mail, Phone, User, Activity, Plus, Loader2, Trash, Trash2, X, Eye, Download } from "lucide-react";
+import { ArrowLeft, Calendar, Mail, Phone, User, Activity, Plus, Loader2, Trash, Trash2, X, Eye, Download, Camera } from "lucide-react";
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { jsPDF } from "jspdf";
@@ -37,7 +37,7 @@ const CircularProgress = ({ value, label, subLabel, color = "text-teal-600" }) =
                         stroke="currentColor"
                         strokeWidth="8"
                         fill="transparent"
-                        strokeDasharray={circumference}
+                        strokeDasharray={`${circumference} ${circumference}`}
                         strokeDashoffset={strokeDashoffset}
                         strokeLinecap="round"
                         className={`${color} transition-all duration-1000 ease-out`}
@@ -53,6 +53,65 @@ const CircularProgress = ({ value, label, subLabel, color = "text-teal-600" }) =
     );
 };
 
+// Camera Feed Component
+const CameraFeed = ({ onCapture }) => {
+    const videoRef = React.useRef(null);
+    const [stream, setStream] = useState(null);
+
+    useEffect(() => {
+        startCamera();
+        return () => stopCamera();
+    }, []);
+
+    const startCamera = async () => {
+        try {
+            const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
+            setStream(mediaStream);
+            if (videoRef.current) {
+                videoRef.current.srcObject = mediaStream;
+            }
+        } catch (err) {
+            console.error("Error accessing camera:", err);
+            alert("Could not access camera. Please check permissions.");
+        }
+    };
+
+    const stopCamera = () => {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            setStream(null);
+        }
+    };
+
+    const takePhoto = () => {
+        if (videoRef.current) {
+            const canvas = document.createElement('canvas');
+            canvas.width = videoRef.current.videoWidth;
+            canvas.height = videoRef.current.videoHeight;
+            canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+
+            canvas.toBlob((blob) => {
+                const file = new File([blob], "camera_capture.jpg", { type: "image/jpeg" });
+                onCapture(file);
+            }, 'image/jpeg');
+        }
+    };
+
+    return (
+        <div className="relative w-full h-full bg-black flex flex-col items-center justify-center">
+            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <div className="absolute bottom-4 left-0 right-0 flex justify-center pb-2">
+                <button
+                    onClick={takePhoto}
+                    className="bg-white rounded-full p-4 shadow-lg hover:scale-105 transition-transform border-4 border-teal-500"
+                >
+                    <div className="w-12 h-12 bg-teal-500 rounded-full border-2 border-white"></div>
+                </button>
+            </div>
+        </div>
+    );
+};
+
 export default function PatientDetails() {
     const { id } = useParams();
     const navigate = useNavigate();
@@ -61,6 +120,7 @@ export default function PatientDetails() {
     const [reports, setReports] = useState([]);
     const [loading, setLoading] = useState(true);
     const [previewReport, setPreviewReport] = useState(null); // State for preview modal
+    const [showCamera, setShowCamera] = useState(false); // State for camera modal
 
     useEffect(() => {
         const fetchPatientAndReports = async () => {
@@ -162,6 +222,7 @@ export default function PatientDetails() {
             const res = await api.post("/patients/analyze", { patientId: id, imageUrl });
             setAnalysisResult(res.data);
             setPreviewReport(res.data); // Auto-open preview
+            setReports((prev) => [res.data, ...prev]); // Add to history immediately
         } catch (error) {
             console.error("Analysis failed:", error);
             alert("Failed to analyze image.");
@@ -532,11 +593,47 @@ export default function PatientDetails() {
                         >
                             <div className="flex items-center justify-between mb-6">
                                 <h3 className="text-lg font-bold text-slate-800">Skin Images Gallery</h3>
-                                <label className="flex items-center gap-2 text-sm bg-teal-50 text-teal-700 px-3 py-1.5 rounded-lg font-semibold hover:bg-teal-100 transition-colors cursor-pointer hover:shadow-md transform hover:-translate-y-0.5">
-                                    <Plus className="w-4 h-4" /> Add Image
-                                    <input type="file" className="hidden" accept="image/*" onChange={handleImageUpload} />
-                                </label>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setShowCamera(true)}
+                                        className="flex items-center gap-2 text-sm bg-teal-50 text-teal-700 px-3 py-1.5 rounded-lg font-semibold hover:bg-teal-100 transition-colors hover:shadow-md transform hover:-translate-y-0.5"
+                                    >
+                                        <Camera className="w-4 h-4" /> Take Photo
+                                    </button>
+                                    <label className="flex items-center gap-2 text-sm bg-teal-50 text-teal-700 px-3 py-1.5 rounded-lg font-semibold hover:bg-teal-100 transition-colors cursor-pointer hover:shadow-md transform hover:-translate-y-0.5">
+                                        <Plus className="w-4 h-4" /> Add Image
+                                        <input type="file" className="hidden" accept="image/*" onChange={handleImageUpload} />
+                                    </label>
+                                </div>
                             </div>
+
+                            {/* Camera Modal */}
+                            <AnimatePresence>
+                                {showCamera && (
+                                    <motion.div
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        exit={{ opacity: 0 }}
+                                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                                    >
+                                        <div className="bg-white rounded-2xl overflow-hidden shadow-2xl max-w-lg w-full relative">
+                                            <div className="p-4 bg-teal-600 flex justify-between items-center text-white">
+                                                <h3 className="font-bold flex items-center gap-2"><Camera className="w-5 h-5" /> Capture Image</h3>
+                                                <button onClick={() => setShowCamera(false)} className="hover:bg-teal-700 p-1 rounded-full"><X className="w-5 h-5" /></button>
+                                            </div>
+                                            <div className="relative bg-black aspect-[4/3]">
+                                                <CameraFeed onCapture={(file) => {
+                                                    // Mock event object to reuse existing handler
+                                                    const event = { target: { files: [file] } };
+                                                    handleImageUpload(event);
+                                                    setShowCamera(false);
+                                                }} />
+                                            </div>
+                                        </div>
+                                    </motion.div>
+                                )}
+                            </AnimatePresence>
+
 
                             <motion.div
                                 variants={container}
@@ -630,10 +727,10 @@ export default function PatientDetails() {
                         </motion.div>
                     </div>
                 </div>
-            </div>
+            </div >
 
             {/* Report Preview Modal */}
-            <AnimatePresence>
+            < AnimatePresence >
                 {previewReport && (
                     <motion.div
                         initial={{ opacity: 0 }}
@@ -729,64 +826,92 @@ export default function PatientDetails() {
                                     const predConf = Math.round(parseFloat(predParts[1]?.replace(/[^0-9.]/g, '')) || 0);
                                     const predRemark = predParts.slice(2).join(',') || "No remarks.";
 
-                                    return (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                            {/* Verification Card */}
-                                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex flex-col">
-                                                <div className="flex justify-between items-start mb-6">
-                                                    <div>
-                                                        <h4 className="font-bold text-black mb-1">Verification</h4>
-                                                        <p className="text-sm text-slate-600">Initial Assessment</p>
-                                                    </div>
-                                                    <span className={`px-3 py-1 rounded-full text-xs font-bold ${status.trim().toLowerCase().includes('healthy') ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                    // Helper for "Nice UI" Card
+                                    const ReportCard = ({ title, status, progressValue, progressLabel, details, bgHeader, borderColor, progressColor, children }) => (
+                                        <div className={`bg-white rounded-xl shadow-sm border-[1.5px] ${borderColor} flex flex-col overflow-hidden h-full`}>
+                                            {/* Header Strip */}
+                                            <div className={`${bgHeader} px-6 py-4 border-b ${borderColor} flex justify-between items-center`}>
+                                                <h4 className="font-bold text-slate-800 text-lg">{title}</h4>
+                                                {status && (
+                                                    <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide bg-white border ${borderColor} text-slate-700`}>
                                                         {status}
                                                     </span>
-                                                </div>
-                                                <div className="flex items-center gap-6 mb-6">
-                                                    <CircularProgress value={verifyConf} label="Confidence" />
-                                                    <div className="flex-1">
-                                                        <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold mb-1">Skin Type</p>
-                                                        <p className="font-bold text-black text-lg">{skinType}</p>
-                                                    </div>
-                                                </div>
-                                                <div className="bg-slate-50 p-4 rounded-lg flex-1">
-                                                    <p className="text-sm text-slate-900 leading-relaxed italic">"{verifyRemark}"</p>
-                                                </div>
+                                                )}
                                             </div>
 
-                                            {/* AI Prediction Card */}
-                                            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex flex-col">
+                                            <div className="p-6 flex flex-col flex-1">
+                                                {/* Top Section: Details Left, Circle Right */}
                                                 <div className="flex justify-between items-start mb-6">
-                                                    <div>
-                                                        <h4 className="font-bold text-black mb-1">AI Diagnostics</h4>
-                                                        <p className="text-sm text-slate-600">Deep Learning Analysis</p>
+                                                    <div className="flex-1 space-y-4">
+                                                        {details.map((item, idx) => (
+                                                            <div key={idx}>
+                                                                <p className="text-xs text-slate-400 uppercase tracking-wider font-bold mb-1">{item.label}</p>
+                                                                <p className="font-bold text-slate-900 text-lg">{item.value}</p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+
+                                                    {/* Circular Progress (Right Aligned) */}
+                                                    <div className="ml-4 flex flex-col items-center">
+                                                        <CircularProgress value={progressValue} color={progressColor} />
                                                     </div>
                                                 </div>
-                                                <div className="flex items-center gap-6 mb-6">
-                                                    <CircularProgress value={predConf} color="text-indigo-600" label="Probability" />
-                                                    <div className="flex-1">
-                                                        <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold mb-1">Detected Condition</p>
-                                                        <p className="font-bold text-indigo-700 text-lg">{condition}</p>
-                                                    </div>
-                                                </div>
-                                                <div className="bg-indigo-50 p-4 rounded-lg flex-1 border border-indigo-100">
-                                                    <p className="text-sm text-indigo-900 leading-relaxed">
-                                                        {predRemark.length > 150 ? predRemark.substring(0, 150) + "..." : predRemark}
-                                                    </p>
+
+                                                {/* Bottom Section: Remarks/Content */}
+                                                <div className={`mt-auto p-4 rounded-lg bg-slate-50 border border-slate-100 text-sm leading-relaxed text-slate-700`}>
+                                                    {children}
                                                 </div>
                                             </div>
+                                        </div>
+                                    );
+
+                                    return (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2">
+                                            {/* Verification Card */}
+                                            <ReportCard
+                                                title="Verification:"
+                                                status={status}
+                                                bgHeader="bg-teal-50"
+                                                borderColor="border-teal-500"
+                                                progressValue={verifyConf}
+                                                progressLabel="Confidence"
+                                                progressColor="text-teal-600"
+                                                details={[
+                                                    { label: "Status:", value: status },
+                                                    { label: "Skin Type:", value: skinType }
+                                                ]}
+                                            >
+                                                <span className="italic">"{verifyRemark}"</span>
+                                            </ReportCard>
+
+                                            {/* AI Prediction Card */}
+                                            <ReportCard
+                                                title="AI Prediction:"
+                                                // status="Active Case" // Optional status
+                                                bgHeader="bg-teal-50"
+                                                borderColor="border-teal-500"
+                                                progressValue={predConf}
+                                                progressLabel="Confidence"
+                                                progressColor="text-teal-600" // Matching the green theme requested
+                                                details={[
+                                                    { label: "Condition:", value: condition },
+                                                    // { label: "Severity:", value: "Moderate" } // Example
+                                                ]}
+                                            >
+                                                {predRemark}
+                                            </ReportCard>
                                         </div>
                                     );
                                 })()}
 
 
-                                {/* Detailed Report Section */}
-                                <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-100">
-                                    <div className="flex items-center gap-2 mb-6 border-b border-slate-100 pb-4">
-                                        <Activity className="w-5 h-5 text-teal-600" />
-                                        <h3 className="text-lg font-bold text-black">Detailed Medical Analysis</h3>
+                                {/* Detailed Report Section with Matching UI */}
+                                <div className="bg-white rounded-xl shadow-sm border-[1.5px] border-teal-500 overflow-hidden">
+                                    <div className="bg-teal-50 px-6 py-4 border-b border-teal-500 flex items-center gap-2">
+                                        <Activity className="w-5 h-5 text-teal-700" />
+                                        <h3 className="text-lg font-bold text-slate-800">Detailed Medical Analysis</h3>
                                     </div>
-                                    <div className="prose max-w-none text-black prose-headings:font-bold prose-headings:text-black prose-h2:text-teal-900 prose-h3:text-black prose-p:text-black prose-li:text-black prose-strong:text-black prose-ul:text-black prose-ol:text-black">
+                                    <div className="p-8 prose max-w-none text-slate-900 prose-headings:font-bold prose-headings:text-slate-900 prose-h2:text-teal-800 prose-h3:text-slate-800 prose-p:text-slate-700 prose-li:text-slate-700 prose-strong:text-slate-900 prose-ul:text-slate-700 prose-ol:text-slate-700">
                                         <ReactMarkdown>
                                             {previewReport.report || "**No detailed report available.**"}
                                         </ReactMarkdown>
@@ -807,11 +932,12 @@ export default function PatientDetails() {
                             </div>
                         </motion.div>
                     </motion.div>
-                )}
-            </AnimatePresence>
+                )
+                }
+            </AnimatePresence >
 
             {/* Analysis Modal */}
-            <AnimatePresence>
+            < AnimatePresence >
                 {(analyzing || analysisResult) && (
                     <motion.div
                         initial={{ opacity: 0 }}
@@ -894,7 +1020,7 @@ export default function PatientDetails() {
                         </motion.div>
                     </motion.div>
                 )}
-            </AnimatePresence>
+            </AnimatePresence >
         </Layout >
     );
 }
