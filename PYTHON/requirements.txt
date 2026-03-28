@@ -5,10 +5,10 @@ uvicorn>=0.27.0
 gunicorn>=21.2.0
 python-dotenv
 requests
-numpy<2.0.0
+numpy
 scikit-learn
-torch==2.2.2+cpu
-torchvision==0.17.2+cpu
+torch==2.11.0+cpu
+torchvision==0.26.0+cpu
 Pillow
 firebase-admin
 textwrap3
