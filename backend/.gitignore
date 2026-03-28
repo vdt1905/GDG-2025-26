@@ -32,5 +32,4 @@ coverage/
 .DS_Store
 Thumbs.db
 backend/serviceAccountKey.json
-*.json
 .env
