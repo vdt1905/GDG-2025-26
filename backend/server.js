@@ -8,12 +8,19 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({
-    origin: "*",
+const corsOptions = {
+    origin: [
+        "https://shushrutai.vercel.app"
+    ],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"]
-}));
-app.options("*", cors());
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
+};
+
+app.use(cors(corsOptions));
+
+// 🔥 IMPORTANT: handle preflight properly
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
 // Routes

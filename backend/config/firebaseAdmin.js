@@ -18,9 +18,8 @@ try {
 }
 
 if (!serviceAccount) {
-    console.error("ERROR: No service account credentials found. Please place 'serviceAccountKey.json' in the backend folder.");
-    // We don't exit process here to allow the server to start even if broken, 
-    // but in production we should.
+    console.error("CRITICAL ERROR: No service account credentials found. Set FIREBASE_SERVICE_ACCOUNT in your Vercel Environment Variables as a minified JSON string.");
+    throw new Error("Firebase Service Account missing or invalid. Check your Vercel env variable.");
 } else {
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
