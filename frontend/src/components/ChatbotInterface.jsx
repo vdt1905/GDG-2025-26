@@ -152,7 +152,8 @@ const ChatbotInterface = () => {
                 "deep_search": deepSearch
             })
             try {
-                const newBotMessage = await axios.post('http://localhost:6700/ans', {
+                const pythonUrl = import.meta.env.VITE_PYTHON_URL || 'http://localhost:6700';
+                const newBotMessage = await axios.post(`${pythonUrl}/ans`, {
                     "query": message,
                     "deep_search": deepSearch
                 })
@@ -165,7 +166,7 @@ const ChatbotInterface = () => {
             } catch (error) {
                 console.error("Error connecting to chatbot server:", error);
                 setMessages(prev => [...prev, {
-                    text: "I'm having trouble connecting to my brain server (localhost:6700). Please ensure it's running.",
+                    text: "I'm having trouble connecting to the AI server. Please try again in a moment.",
                     sender: 'bot'
                 }]);
             }

@@ -175,7 +175,7 @@ async def classify_image(req: Id):
         # Agent 1: Verify Medical Agent
         verify_med_agent = Agent(
             name="Medical_Imaging_Expert",
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             instruction="""Analyze the given skin image as a very good and expert dermatologist to determine if the skin is healthy or unhealthy.
 - Provide a realistic confidence percentage based on visual clarity and distinct presentation of symptoms. Do NOT force it to be 100%.
 - If healthy, classify it as 'Healthy' and provide the confidence level in percentage.

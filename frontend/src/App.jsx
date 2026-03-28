@@ -33,6 +33,7 @@ function App() {
         {/* Public Routes */}
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<Login />} />
+        <Route path="/future-aspect" element={<FutureAspect />} />
 
         {/* Private Routes */}
         <Route element={<PrivateRoute />}>
@@ -41,7 +42,7 @@ function App() {
           <Route path="/patients" element={<Patients />} />
           <Route path="/register-patient" element={<RegisterPatient />} />
           <Route path="/patients/:id" element={<PatientDetails />} />
-          <Route path="/future-aspect" element={<FutureAspect />} />
+          
         </Route>
 
       </Routes>

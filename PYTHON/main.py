@@ -19,9 +19,16 @@ import google.generativeai as genai
 load_dotenv()
 
 # Firebase Initialization
-cred_path = os.path.join("..", "backend", "serviceAccountKey.json")
+import json
+
 try:
-    cred = credentials.Certificate(cred_path)
+    if "FIREBASE_SERVICE_ACCOUNT_JSON" in os.environ:
+        cred_dict = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"])
+        cred = credentials.Certificate(cred_dict)
+    else:
+        cred_path = os.path.join("..", "backend", "serviceAccountKey.json")
+        cred = credentials.Certificate(cred_path)
+
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
@@ -452,4 +459,5 @@ Question: {q.query}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run('main:app', host="127.0.0.1", port=6700, reload=True)
+    port = int(os.environ.get("PORT", 6700))
+    uvicorn.run('main:app', host="0.0.0.0", port=port, reload=True)
