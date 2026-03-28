@@ -18,4 +18,3 @@ google-genai
 duckduckgo-search
 pypdf
 pydantic>=2.0.0
-google-generativeai
