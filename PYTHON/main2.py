@@ -170,7 +170,7 @@ async def classify_image(req: Id):
 
         # Optimization: Use gemini-1.5-flash (more stable) or gemini-2.0-flash-exp
         # gemini-2.5-flash DOES NOT EXIST and will cause 502 errors.
-        MODEL_NAME = "gemini-1.5-flash" 
+        MODEL_NAME = "gemini-2.0-flash" 
 
         # Agent 1: Verify Medical Agent
         verify_med_agent = Agent(
@@ -273,7 +273,7 @@ async def get_ans(q: Query):
 
         agent = Agent(
             name=agent_name,
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             instruction=f"Analyze the given question based on: {mongo_pred}. Concise and professional answer.",
             description="Expert dermatology assistant",
             tools=[google_search]
