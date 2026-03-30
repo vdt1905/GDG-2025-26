@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import axios from "axios";
 import Layout from "../components/Layout";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import useAuthStore from "../store/authStore";
@@ -219,13 +220,20 @@ export default function PatientDetails() {
         setAnalyzing(true);
         setAnalysisResult(null);
         try {
-            const res = await api.post("/patients/analyze", { patientId: id, imageUrl });
+            // Direct call to Render Python backend to bypass Vercel's 10s timeout
+            const RENDER_URL = "https://gdg-2025-26.onrender.com";
+            const res = await axios.post(`${RENDER_URL}/predict`, { 
+                obj_id: id, 
+                imageUrl 
+            });
+            
             setAnalysisResult(res.data);
             setPreviewReport(res.data); // Auto-open preview
             setReports((prev) => [res.data, ...prev]); // Add to history immediately
         } catch (error) {
             console.error("Analysis failed:", error);
-            alert("Failed to analyze image.");
+            const errorMsg = error.response?.data?.detail || error.message;
+            alert(`Analysis failed: ${errorMsg}. Ensure your Python backend is running.`);
         } finally {
             setAnalyzing(false);
         }

@@ -267,7 +267,7 @@ async def get_ans(q: Query):
 
     agent = Agent(
         name=agent_name,
-        model="gemini-2.5-flash",
+        model="gemini-1.5-flash",
         instruction=f"""Analyze the given question as an expert dermatologist.
 Diagnosis context: {mongo_pred if mongo_pred else 'No context available'}.
 - Provide concise answer.
