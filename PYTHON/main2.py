@@ -35,7 +35,11 @@ import json
 
 try:
     if "FIREBASE_SERVICE_ACCOUNT_JSON" in os.environ:
-        cred_dict = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"])
+        json_str = os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"].strip()
+        # Handle cases where the string might be wrapped in quotes by some environments
+        if json_str.startswith('"') and json_str.endswith('"'):
+            json_str = json_str[1:-1].replace('\\"', '"')
+        cred_dict = json.loads(json_str)
         cred = credentials.Certificate(cred_dict)
     else:
         cred_path = os.path.join("..", "backend", "serviceAccountKey.json")
