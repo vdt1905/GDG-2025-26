@@ -260,35 +260,34 @@ async def get_ans(q: Query):
                 f"Detailed Report: {data.get('report', '')}\n\n"
                 f"Expert Recommendations (Jarvis): {data.get('jarvis', '')}"
             )
-    except Exception:
+    except Exception as e:
+        print(f"Firestore context error: {e}")
         mongo_pred = ""
 
-    agent_name = "Skin_Disease_Research_Deep" if q.deep_search else "Skin_Disease_Research_Web"
+    try:
+        agent_name = "Skin_Disease_Research_Deep" if q.deep_search else "Skin_Disease_Research_Web"
 
-    agent = Agent(
-        name=agent_name,
-        model="gemini-1.5-flash",
-        instruction=f"""Analyze the given question as an expert dermatologist.
-Diagnosis context: {mongo_pred if mongo_pred else 'No context available'}.
-- Provide concise answer.
-- Include references.""",
-        description="Expert dermatology assistant",
-        tools=[google_search]
-    )
+        agent = Agent(
+            name=agent_name,
+            model="gemini-1.5-flash",
+            instruction=f"Analyze the given question based on: {mongo_pred}. Concise and professional answer.",
+            description="Expert dermatology assistant",
+            tools=[google_search]
+        )
 
-    # Create session service
-    session_service = InMemorySessionService()
-    user_id = "default_user"
-    session_id = "ans_session"
-    
-    await session_service.create_session(
-        app_name="shrushrutai_app",
-        user_id=user_id,
-        session_id=session_id
-    )
+        # Create session service
+        session_service = InMemorySessionService()
+        user_id = "default_user"
+        session_id = "ans_session"
+        
+        await session_service.create_session(app_name="shrushrutai_app", user_id=user_id, session_id=session_id)
 
-    response_text = await get_agent_response(agent, q.query, session_service, user_id, session_id)
-    return {"response": response_text}
+        response_text = await get_agent_response(agent, q.query, session_service, user_id, session_id)
+        return {"response": response_text}
+    except Exception as e:
+        print(f"Chatbot Agent Error: {e}")
+        # Return 500 with details so frontend can see what happened
+        raise HTTPException(status_code=500, detail=f"AI Agent Error: {str(e)}")
 
 
 if __name__ == "__main__":

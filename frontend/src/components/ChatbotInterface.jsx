@@ -152,7 +152,7 @@ const ChatbotInterface = () => {
                 "deep_search": deepSearch
             })
             try {
-                const pythonUrl = import.meta.env.VITE_PYTHON_URL || 'http://localhost:6700';
+                const pythonUrl = import.meta.env.VITE_PYTHON_URL || 'https://shushrutai-lp0y.onrender.com';
                 const newBotMessage = await axios.post(`${pythonUrl}/ans`, {
                     "query": message,
                     "deep_search": deepSearch
