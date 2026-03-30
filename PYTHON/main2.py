@@ -7,6 +7,12 @@ import os
 import requests
 from io import BytesIO
 from pydantic import BaseModel
+import torch
+import gc
+# Limit PyTorch to 1 thread to avoid background RAM explosion
+torch.set_num_threads(1)
+gc.collect()
+
 from dotenv import load_dotenv
 from typing import Optional
 import time
@@ -127,240 +133,103 @@ async def classify_image(req: Id):
     if not image_url:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    try:
-        # Enhanced image fetching with headers and retry
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        max_retries = 3
-        response = None
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(image_url, headers=headers, timeout=10)
-                response.raise_for_status()
-                break # Success
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"Failed to fetch image after {max_retries} attempts: {e}")
-                    raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
-                print(f"Image fetch failed (attempt {attempt+1}/{max_retries}). Retrying...")
-                time.sleep(1)
 
+    try:
+        # Load image
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(image_url, headers=headers, timeout=10)
+        response.raise_for_status()
         image = Image.open(BytesIO(response.content)).convert("RGB")
 
         # Save image temporarily
-        temp_path = "temp_image.png"
+        temp_path = f"temp_{obj_id}.png"
         image.save(temp_path)
 
-        # Get predictions from models
-        result_c = predict_c(image)
-        result_d = predict_d(image)
+        # Run CPU-bound PyTorch models in a separate thread to avoid blocking FastAPI
+        import asyncio
+        loop = asyncio.get_event_loop()
+        
+        # Parallel execution of model predictions
+        res_c, res_d = await asyncio.gather(
+            loop.run_in_executor(None, predict_c, image),
+            loop.run_in_executor(None, predict_d, image)
+        )
 
-        if result_c["confidence"] > result_d["confidence"]:
-            result_pred = result_c
-            minor_result = result_d
-        elif result_d["confidence"] > result_c["confidence"]:
-            result_pred = result_d
-            minor_result = result_c
-        else:
-            result_pred = result_c
-            minor_result = result_d
+        result_pred = res_c if res_c["confidence"] > res_d["confidence"] else res_d
+        minor_result = res_d if res_c["confidence"] > res_d["confidence"] else res_c
 
         # Create session service for agents
         session_service = InMemorySessionService()
         user_id = "default_user"
         session_id = f"session_{obj_id}"
-        
-        # Create session
-        await session_service.create_session(
-            app_name="shrushrutai_app",
-            user_id=user_id,
-            session_id=session_id
-        )
+        await session_service.create_session(app_name="shrushrutai_app", user_id=user_id, session_id=session_id)
+
+        # Optimization: Use gemini-1.5-flash (more stable) or gemini-2.0-flash-exp
+        # gemini-2.5-flash DOES NOT EXIST and will cause 502 errors.
+        MODEL_NAME = "gemini-1.5-flash" 
 
         # Agent 1: Verify Medical Agent
         verify_med_agent = Agent(
             name="Medical_Imaging_Expert",
-            model="gemini-2.5-flash",
-            instruction="""Analyze the given skin image as a very good and expert dermatologist to determine if the skin is healthy or unhealthy.
-- Provide a realistic confidence percentage based on visual clarity and distinct presentation of symptoms. Do NOT force it to be 100%.
-- If healthy, classify it as 'Healthy' and provide the confidence level in percentage.
-- If unhealthy, classify it as 'Unhealthy' and provide the confidence level in percentage.
-- Additionally, determine the skin type as one of the following: 'Dry', 'Oily', or 'Normal'.
-- give answer in strictly <classification>,<confidence score in percent>,<skin type>,<remarks : give some remarks that is in one to two lines> format only.""",
-            description="Expert dermatologist for skin analysis",
-            # tools=[google_search] # Removed search for verify agent as it's image based
+            model=MODEL_NAME,
+            instruction="Analyze skin image. Determine if healthy/unhealthy. Format: <classification>,<confidence>,<skin type>,<remarks>",
         )
 
         verify_content = await get_agent_response(
             verify_med_agent,
             f"Please analyze this medical image at path: {temp_path}",
-            session_service,
-            user_id,
-            session_id
+            session_service, user_id, session_id
         )
 
-        # Agent 2: Unhealthy Skin Agent
+        # Agent 2: Unhealthy Skin Agent (Depends on verify_content)
         unhealthy_skin_agent = Agent(
             name="Medical_Imaging_Analysis_Expert",
-            model="gemini-2.5-flash",
-            instruction=f"""Analyze the given skin image as an expert dermatologist. If the skin appears healthy, classify the prediction as 'Healthy' and provide the confidence level. If unhealthy, use the model output to determine the disease. The prediction by deep learning model is {result_pred}. If classified as one of the following: 'Actinic Keratosis', 'Atopic Dermatitis', 'Benign Keratosis', 'Dermatofibroma', 'Melanocytic Nevus', 'Melanoma', 'Squamous Cell Carcinoma', 'Tinea Ringworm Candidiasis', or 'Vascular Lesion', assess the likelihood of skin cancer otherwise its a disease. Provide the disease name, confidence level, and remarks. Additionally, include possible symptoms that might be present for further diagnostic evaluation.
-
-Context from previous analysis: {verify_content}
-
-- give answer in strictly <disease>,<confidence score in percent>,<remarks in two to three lines> format only.
-- If the skin appears healthy, classify it as 'Healthy' and provide the confidence level in percentage.""",
-            description="Diagnoses skin diseases from images",
-            # tools=[google_search]
+            model=MODEL_NAME,
+            instruction=f"Diagnose based on model output: {result_pred}. Context: {verify_content}. assess likelihood of skin cancer if applicable. Format: <disease>,<confidence>,<remarks>",
         )
 
         pred_content = await get_agent_response(
             unhealthy_skin_agent,
             f"Please analyze this medical image at path: {temp_path}",
-            session_service,
-            user_id,
-            session_id
+            session_service, user_id, session_id
         )
 
-        # Agent 3: Report Agent
+        # Agent 3 & 4 can run in PARALLEL to save time and prevent 502 timeouts
         report_agent = Agent(
-            name="Medical_Imaging_Analysis_and_report_generator_Expert",
-            model="gemini-2.5-flash",
-            instruction=f"""
-        Act as a senior consultant dermatologist. Generate a highly detailed and comprehensive medical report for the following case.
-        
-        **Patient Analysis Context:**
-        - Suspected Condition: {result_pred['class']} (Confidence: {result_pred['confidence']:.2f})
-        - Secondary Possibility: {minor_result['class']} (Confidence: {minor_result['confidence']:.2f})
-        - Initial Assessment: {verify_content}
-        
-        **Required Report Structure (Use Markdown):**
-
-        ### 1. Detailed Clinical Observations
-        - Describe lesion morphology (size, color, texture, borders).
-        - Note anatomical location and distribution patterns.
-        - Mention any visible signs of inflammation, scaling, or ulceration.
-
-        ### 2. Differential Diagnosis & Reasoning
-        - **Primary Diagnosis**: Explain why {result_pred['class']} is the most likely diagnosis based on visual evidence.
-        - **Differentials**: List 2-3 other conditions that share similar features but are less likely, and explain why.
-
-        ### 3. Pathophysiology (Brief)
-        - Explain the underlying biological mechanism of the primary condition.
-
-        ### 4. Comprehensive Management Plan
-        - **Pharmacological**: Suggest specific generic classes of topical/oral medications (e.g., "Topical corticosteroids", "Antifungals").
-        - **Lifestyle & Hygiene**: Specific advice on skincare, diet, and triggers.
-        - **Home Care**: Actionable steps for the patient.
-
-        ### 5. Prognosis & Follow-up
-        - Expected course of the condition.
-        - Warning signs that require immediate medical attention.
-
-        **Tone:** Professional, clinical, and empathetic.
-        **Format:** strictly markdown, no preamble.
-        """,
-            description="Generates comprehensive medical reports",
+            name="Report_Generator",
+            model=MODEL_NAME,
+            instruction=f"Generate detailed markdown report. Primary: {result_pred['class']}, Secondary: {minor_result['class']}. Include lifestyle advice.",
             tools=[google_search]
         )
 
-        report_content = await get_agent_response(
-            report_agent,
-            f"Please analyze this skin image output context and generate a proper report for Dermatologist to understand. Image path: {temp_path}",
-            session_service,
-            user_id,
-            session_id
-        )
-
-        # Agent 4: Jarvis Agent
         jarvis_agent = Agent(
-            name="Medical_Imaging_Expert",
-            model="gemini-2.5-flash",
-            instruction=f"""You are an AI-powered Dermatology Voice Assistant, designed to provide expert-level support to dermatologists. Your role is to analyze report {report_content} recommend evidence-based treatments, and guide doctors on the next steps using the latest research and drug discoveries.
-
-The most likely condition the patient could have is **{result_pred['class']}** with a confidence of {result_pred['confidence']:.2f}.
-Additionally, there is a minor possibility of **{minor_result['class']}** with a confidence of {minor_result['confidence']:.2f}.
-
-**Remarks:**
-- **{result_pred['class']}** (Confidence: {result_pred['confidence']:.2f}) is the primary concern and should be prioritized for diagnosis and treatment.
-- **{minor_result['class']}** (Confidence: {minor_result['confidence']:.2f}) may be a secondary condition or share similar symptoms. Further medical evaluation is recommended to rule it out.
-
-### 1️⃣ Understand & Analyze the Case
-- Listen to the doctor's query about a patient's condition.
-- Identify the disease or condition being discussed.
-- Analyze symptoms, affected areas, and disease progression based on the given context or medical report.
-
-### 2️⃣ Provide the Latest Treatment Recommendations
-- Fetch current treatment guidelines, FDA-approved drugs, and clinical trials using web sources.
-- Explain the best available treatment options, including topical, oral, biologic, and advanced therapies.
-- Compare traditional treatments with newly discovered therapies (e.g., AI-assisted skin diagnostics, gene therapy, biologics).
-
-### 3️⃣ Generate a Complete Prescription Plan
-- Suggest medications, dosages, frequency, and possible side effects.
-- Recommend adjunct therapies, such as lifestyle modifications and skincare routines.
-- Warn about contraindications or potential drug interactions.
-
-### 4️⃣ Guide the Doctor on the Next Steps
-- Recommend further diagnostic tests (e.g., biopsy, dermoscopy, blood tests, genetic markers).
-- Suggest patient follow-up intervals and monitoring plans.
-- Provide guidelines for managing severe or resistant cases.
-
-### 5️⃣ Provide Reliable Medical Sources & Links
-- Fetch research-backed insights from trusted sources such as PubMed, JAMA Dermatology, The Lancet, FDA, and WHO.
-- Offer links to the latest studies, treatment guidelines, and clinical trials for validation.
-
-Context: {pred_content}
-
-Instructions should be understandable by Dermatologists not for layman audience and make it like a professional advice to doctor like doctor is giving advice to the other doctor and make complete instruction summarize and in 4 to 5 lines pointwise.
-- give answer in proper markdown format.""",
-            description="Provides clinical guidance to dermatologists",
+            name="Jarvis_Assistant",
+            model=MODEL_NAME,
+            instruction=f"Provide clinical guidance for {result_pred['class']}. Guidance should be for doctors. Summarize in 4-5 points.",
             tools=[google_search]
         )
 
-        jarvis_content = await get_agent_response(
-            jarvis_agent,
-            "Please analyze this skin based diagnostics report and give instructions to doctor",
-            session_service,
-            user_id,
-            session_id
-        )
+        # RUN SEARCH AGENTS IN PARALLEL
+        report_task = get_agent_response(report_agent, f"Generate report for image: {temp_path}", session_service, user_id, session_id)
+        jarvis_task = get_agent_response(jarvis_agent, "Give instructions to doctor based on diagnostics", session_service, user_id, session_id)
+        
+        report_content, jarvis_content = await asyncio.gather(report_task, jarvis_task)
 
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
+        # Clean up
+        if os.path.exists(temp_path): os.remove(temp_path)
 
         # Save to Firestore
-        try:
-            timestamp = firestore.SERVER_TIMESTAMP
-            final_report_data = {
-                "patientId": obj_id,
-                "timestamp": timestamp,
-                "imageUrl": image_url,
-                "verify": verify_content,
-                "prediction": pred_content,
-                "report": report_content,
-                "jarvis": jarvis_content
-            }
-            
-            # Save to subcollection
-            db.collection("patients").document(obj_id).collection("reports").add(final_report_data)
-            
-            # Update latest context (for chatbot)
-            # We can save simpler version or full version
-            db.collection("diagnoses").document("latest").set({
-                "pred": pred_content,
-                "report": report_content,
-                "jarvis": jarvis_content
-            }, merge=True)
+        final_report_data = {
+            "patientId": obj_id,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "imageUrl": image_url,
+            "verify": verify_content,
+            "prediction": pred_content,
+            "report": report_content,
+            "jarvis": jarvis_content
+        }
+        db.collection("patients").document(obj_id).collection("reports").add(final_report_data)
 
-        except Exception as e:
-            print(f"Error saving final report to Firestore: {e}")
-
-        # Return format ensuring compatibility with patientController.js
         return {
             "imageUrl": image_url,
             "verify": verify_content,

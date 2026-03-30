@@ -24,6 +24,12 @@ def load_model(weights_path, num_classes):
     model.eval()
     return model
 
+
+# Load model once at startup to save memory and time
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_weights_path = os.path.join(os.path.dirname(__file__), "models", "model_epoch_25.pth") if os.path.exists(os.path.join(os.path.dirname(__file__), "models", "model_epoch_25.pth")) else r"./models/model_epoch_25.pth"
+_GLOBAL_MODEL_D = load_model(_weights_path, num_classes=23)
+
 def predict_d(image: Image.Image):
     class_names = [
     "Acne and Rosacea Photos", "Actinic Keratosis Basal Cell Carcinoma and other Malignant Lesions",
@@ -36,16 +42,16 @@ def predict_d(image: Image.Image):
     "Seborrheic Keratoses and other Benign Tumors", "Systemic Disease", "Tinea Ringworm Candidiasis and other Fungal Infections",
     "Urticaria Hives", "Vascular Tumors", "Vasculitis Photos", "Warts Molluscum and other Viral Infections"
     ]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(r"./models/model_epoch_25.pth", num_classes=23)
+    
     transform = transforms.Compose([
         transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    image = transform(image).unsqueeze(0).to(device)
+    
+    input_tensor = transform(image).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
-        output = model(image)
+        output = _GLOBAL_MODEL_D(input_tensor)
         probabilities = torch.softmax(output, dim=1)
         predicted_class = torch.argmax(probabilities, dim=1).item()
         confidence = probabilities[0, predicted_class].item()
