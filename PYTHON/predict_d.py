@@ -44,17 +44,22 @@ def predict_d(image: Image.Image):
     "Urticaria Hives", "Vascular Tumors", "Vasculitis Photos", "Warts Molluscum and other Viral Infections"
     ]
     
+    # Input size is env-configurable. densenet121 at 512x512 spikes activation memory
+    # and OOMs a 512MB host, so we default to 256 (roughly 1/4 the memory). Set
+    # DENSENET_INPUT_SIZE=512 on a larger instance (>=2GB) to restore full resolution.
+    _size = int(os.environ.get("DENSENET_INPUT_SIZE", "256"))
     transform = transforms.Compose([
-        transforms.Resize((512, 512)),
+        transforms.Resize((_size, _size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    
+
     input_tensor = transform(image).unsqueeze(0).to(DEVICE)
-    with torch.no_grad():
+    with torch.inference_mode():
         output = _GLOBAL_MODEL_D(input_tensor)
         probabilities = torch.softmax(output, dim=1)
         predicted_class = torch.argmax(probabilities, dim=1).item()
         confidence = probabilities[0, predicted_class].item()
+    del input_tensor, output, probabilities
     return {"class": class_names[predicted_class], "confidence": confidence}
 

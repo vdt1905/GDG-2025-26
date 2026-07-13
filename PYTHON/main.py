@@ -28,6 +28,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+import gc
+import torch
+torch.set_num_threads(1)  # limit CPU/memory footprint on small hosts (Render 512MB)
+
 from predict_c import predict_c
 from predict_d import predict_d
 
@@ -323,6 +327,7 @@ def classify_image(req: Id):
     # Local CNN predictions -> primary / secondary by confidence.
     res_c = predict_c(image)
     res_d = predict_d(image)
+    gc.collect()  # free inference tensors before the LLM call
     primary, secondary = (res_c, res_d) if res_c["confidence"] >= res_d["confidence"] else (res_d, res_c)
 
     # Encode image as JPEG base64 for the vision model.
