@@ -1,28 +1,49 @@
 const admin = require("firebase-admin");
-const path = require("path");
 const dotenv = require("dotenv");
 
 dotenv.config();
 
 let serviceAccount;
 
-try {
-    // Try to load from file first
-    serviceAccount = require("../serviceAccountKey.json");
-} catch (e) {
-    console.log("serviceAccountKey.json not found, attempting to use env vars...");
-    // Fallback to Env Vars if file not present (helpful for deployment sometimes)
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+// 1. Prefer the env var (this is what production/Vercel uses).
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
         serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    } catch (e) {
+        console.error("FIREBASE_SERVICE_ACCOUNT is set but is not valid JSON:", e.message);
+        throw new Error(
+            "FIREBASE_SERVICE_ACCOUNT must be a single-line minified JSON string. " +
+            "Parsing failed — check for stray quotes/newlines in the Vercel env value."
+        );
+    }
+} else {
+    // 2. Fallback to a local key file for local development only.
+    try {
+        serviceAccount = require("../serviceAccountKey.json");
+    } catch (e) {
+        console.error("No FIREBASE_SERVICE_ACCOUNT env var and no serviceAccountKey.json file found.");
     }
 }
 
 if (!serviceAccount) {
-    console.error("CRITICAL ERROR: No service account credentials found. Set FIREBASE_SERVICE_ACCOUNT in your Vercel Environment Variables as a minified JSON string.");
-    throw new Error("Firebase Service Account missing or invalid. Check your Vercel env variable.");
-} else {
+    throw new Error(
+        "Firebase Service Account missing. Set FIREBASE_SERVICE_ACCOUNT (minified JSON) " +
+        "in your environment, or add backend/serviceAccountKey.json for local dev."
+    );
+}
+
+// 3. Repair the private key: when the JSON is pasted into a hosting dashboard,
+//    the "\n" line breaks are often stored as the literal characters "\" + "n".
+//    admin.credential.cert() then fails with "Invalid PEM formatted message".
+if (serviceAccount.private_key && serviceAccount.private_key.includes("\\n")) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+}
+
+// 4. Guard against re-initialization on warm serverless invocations,
+//    which would otherwise throw "The default Firebase app already exists".
+if (!admin.apps.length) {
     admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
+        credential: admin.credential.cert(serviceAccount),
     });
     console.log("Firebase Admin Initialized");
 }

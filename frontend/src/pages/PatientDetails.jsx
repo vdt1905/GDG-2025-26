@@ -221,8 +221,8 @@ export default function PatientDetails() {
         setAnalysisResult(null);
         try {
             // Direct call to Render Python backend to bypass Vercel's 10s timeout
-            const RENDER_URL = "https://shushrutai-lp0y.onrender.com";
-            const res = await axios.post(`${RENDER_URL}/predict`, { 
+            const RENDER_URL = import.meta.env.VITE_PYTHON_URL || "https://shushrutai-lp0y.onrender.com";
+            const res = await axios.post(`${RENDER_URL}/predict`, {
                 obj_id: id, 
                 imageUrl 
             });

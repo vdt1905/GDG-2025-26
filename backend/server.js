@@ -10,8 +10,25 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // 🔥 CORS FIX (Vercel-safe)
+// Configure allowed origins via CORS_ORIGIN env var (comma-separated).
+// Falls back to the production frontend if unset.
+const allowedOrigins = (process.env.CORS_ORIGIN || "https://shushrutai.vercel.app")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+// Any localhost / 127.0.0.1 origin (any port) is allowed for local development.
+const isLocalhost = (origin) =>
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || "");
+
 app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "https://shushrutai.vercel.app");
+    const origin = req.headers.origin;
+    if (origin && (allowedOrigins.includes(origin) || isLocalhost(origin))) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+    } else {
+        res.setHeader("Access-Control-Allow-Origin", allowedOrigins[0]);
+    }
+    res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
@@ -35,9 +52,13 @@ app.get("/", (req, res) => {
     res.send("Shushrut API is running 🚀");
 });
 
-// Start server (local only; Vercel ignores this)
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+// Start a real HTTP listener ONLY when running locally / on a normal server.
+// On Vercel the file is imported as a serverless handler, so calling
+// app.listen() there can crash the function — skip it when VERCEL is set.
+if (!process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
 
 module.exports = app;
