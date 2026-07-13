@@ -1,0 +1,22 @@
+# Render Blueprint for the ShushrutAI Python AI server (FastAPI + PyTorch).
+# Deploy: Render Dashboard -> New -> Blueprint, and point it at the repo.
+# NOTE: Root Directory MUST be GDG-2025-26/PYTHON so the relative model paths
+# ("./models/...") and "from notebooks.model import ..." resolve correctly.
+services:
+  - type: web
+    name: shushrutai-python
+    runtime: python
+    rootDir: GDG-2025-26/PYTHON
+    # Free tier (512MB) may OOM with two torch models loaded — upgrade to
+    # "starter" if the service crashes on boot or during /predict.
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: GOOGLE_API_KEY
+        sync: false          # set in dashboard (secret)
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false          # set in dashboard: minified serviceAccountKey.json

@@ -5,16 +5,17 @@ uvicorn>=0.27.0
 gunicorn>=21.2.0
 python-dotenv
 requests
+certifi
 numpy
 scikit-learn
 torch==2.11.0+cpu
 torchvision==0.26.0+cpu
 Pillow
 firebase-admin
-textwrap3
-arxiv
-google-adk
-google-genai
-duckduckgo-search
-pypdf
 pydantic>=2.0.0
+
+# LLM orchestration (LangGraph) + providers
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-openai>=0.2.0          # used for Sarvam's OpenAI-compatible endpoint

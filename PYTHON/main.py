@@ -1,115 +1,281 @@
-from predict_d import predict_d
-from predict_c import predict_c
+"""
+ShushrutAI — skin-image analysis API (LangGraph edition).
+
+Pipeline (per /predict) — unchanged flow, new LLM layer:
+  1. Resolve the image URL (from the request, or the patient's latest skin image).
+  2. Run the local PyTorch classifiers (predict_c + predict_d) for a suspected class.
+  3. Run a LangGraph graph that produces ONE structured analysis JSON:
+        gemini (vision, primary)  --on failure-->  sarvam (text, fallback)
+     returning {verify, prediction, report, jarvis}.
+  4. Save the report to Firestore and return it to the frontend.
+
+Note: Sarvam is a text-only model and cannot see the image. On the fallback path it
+reasons from the CNN predictions only and flags that visual confirmation is required.
+"""
+
+import os
+import io
+import json
+import time
+import base64
+
+import requests
 from PIL import Image
+from typing import Optional, TypedDict
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import requests
-from io import BytesIO
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from typing import Optional
 
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
-
-import google.generativeai as genai
+from predict_c import predict_c
+from predict_d import predict_d
 
 load_dotenv()
 
-# Firebase Initialization
-import json
+# --------------------------------------------------------------------------- #
+# TLS: build one CA bundle = certifi + OS (Windows) root store, so `requests`
+# AND the LangChain/Gemini REST client verify HTTPS even when an antivirus/proxy
+# intercepts traffic with a root that isn't in certifi. No-op on Linux.
+# --------------------------------------------------------------------------- #
+def _build_ca_bundle():
+    import ssl, tempfile, certifi
+    pem = open(certifi.where(), "rb").read()
+    extra = b""
+    try:
+        for store in ("ROOT", "CA"):
+            for der, _, _ in ssl.enum_certificates(store):
+                try:
+                    extra += ssl.DER_cert_to_PEM_cert(der).encode()
+                except Exception:
+                    pass
+    except AttributeError:
+        return certifi.where()
+    if not extra:
+        return certifi.where()
+    path = os.path.join(tempfile.gettempdir(), "shushrut_cacert.pem")
+    with open(path, "wb") as f:
+        f.write(pem + b"\n" + extra)
+    return path
 
+_CA_BUNDLE = _build_ca_bundle()
+os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)         # openssl / stdlib ssl
+os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA_BUNDLE)    # requests / httpx
+os.environ.setdefault("GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", _CA_BUNDLE)  # gRPC (Firestore)
+
+# --------------------------------------------------------------------------- #
+# Firebase (optional — only needed to auto-resolve images / save reports)
+# --------------------------------------------------------------------------- #
+db = None
 try:
-    if "FIREBASE_SERVICE_ACCOUNT_JSON" in os.environ:
-        cred_dict = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"])
-        cred = credentials.Certificate(cred_dict)
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+
+    if os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON"):
+        cred = credentials.Certificate(json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"]))
     else:
-        cred_path = os.path.join("..", "backend", "serviceAccountKey.json")
-        cred = credentials.Certificate(cred_path)
+        cred = credentials.Certificate(os.path.join("..", "backend", "serviceAccountKey.json"))
 
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase Admin Initialized")
 except Exception as e:
-    print(f"Error initializing Firebase: {e}")
+    print(f"[warn] Firebase not initialized ({e}). /predict still works when imageUrl is passed directly.")
+
+# --------------------------------------------------------------------------- #
+# LLM providers via LangChain + orchestration via LangGraph
+# --------------------------------------------------------------------------- #
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph import StateGraph, START, END
+
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:  # langchain-openai not installed
+    ChatOpenAI = None
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=GOOGLE_API_KEY)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Aggressive retry implementation for API calls
-import time
-import random
+# Sarvam is OpenAI-compatible (https://api.sarvam.ai/v1). Options: sarvam-30b, sarvam-105b.
+SARVAM_MODEL = os.getenv("SARVAM_MODEL", "sarvam-30b")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v1")
 
-# List of models to try in order of preference (Fastest/Cost-effective -> Most Powerful -> Generic Fallbacks)
-FALLBACK_MODELS = [
-    # "gemini-2.0-flash-lite-preview-02-05", 
-    # "gemini-2.0-flash",                     
-    # "gemini-2.0-flash-lite",
-    # "gemini-2.0-flash-exp",
-    # "gemini-2.5-flash",         
-    "gemini-2.5-flash-lite",    
-    # "gemini-3-flash-preview",   
-    # "gemini-flash-latest",
-    # "gemini-pro-latest"
-]
+gemini_llm = ChatGoogleGenerativeAI(
+    model=GEMINI_MODEL,
+    google_api_key=GOOGLE_API_KEY,
+    temperature=0.3,
+    max_output_tokens=8192,
+)
 
-def generate_with_retry(prompt, generation_config, safety_settings, retries=3, delay=5):
-    """
-    Attempts to generate content using a list of fallback models.
-    If a model fails with a quota error (429) or not found (404), it moves to the next model.
-    """
-    last_exception = None
-    
-    for model_name in FALLBACK_MODELS:
-        print(f"Trying model: {model_name}...")
-        try:
-            # Instantiate model
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
-            
-            # Attempt generation with internal retries for transient errors on the SAME model
-            for attempt in range(retries):
-                try:
-                    return model.generate_content(prompt)
-                except Exception as e:
-                    error_str = str(e)
-                    # If it's a hard error like 404 (Not Found) or 429 (Quota), break inner loop to switch model
-                    if "404" in error_str or "429" in error_str or "Quota exceeded" in error_str or "ResourceExhausted" in error_str:
-                         print(f"Model {model_name} failed with Quota/Found error: {e}")
-                         raise e # Re-raise to trigger model switch
-                    
-                    # For other errors (500, etc), wait and retry same model
-                    if attempt < retries - 1:
-                        wait_time = delay * (2 ** attempt) + random.uniform(0, 5)
-                        print(f"Transient Error ({e}) on {model_name}. Retrying in {wait_time:.1f}s...")
-                        time.sleep(wait_time)
-                    else:
-                        raise e # Failed all retries for this model
-            
-        except Exception as e:
-            last_exception = e
-            print(f"Switching from {model_name} due to error...")
-            continue # Try next model in list
-            
-    # If we exhaust all models
-    print(f"All models failed. Last error: {last_exception}")
-    raise last_exception
+sarvam_llm = None
+if SARVAM_API_KEY and ChatOpenAI is not None:
+    # sarvam-30b is a reasoning model that spends its completion budget "thinking",
+    # so we cap reasoning (reasoning_effort=low) and ask it only for a CONCISE note.
+    sarvam_llm = ChatOpenAI(
+        model=SARVAM_MODEL,
+        base_url=SARVAM_BASE_URL,
+        api_key=SARVAM_API_KEY,
+        temperature=0.3,
+        max_tokens=4000,
+        extra_body={"reasoning_effort": "low"},
+    )
 
+
+class Analysis(BaseModel):
+    """Structured analysis contract shared by both providers."""
+    verify: str = Field(description="Single line: '<Healthy|Unhealthy>,<confidence %>,<Dry|Oily|Normal>,<one-line remark>'")
+    prediction: str = Field(description="Single line: '<most likely condition>,<confidence %>,<two-line remark>'")
+    report: str = Field(description="Detailed markdown clinical report.")
+    jarvis: str = Field(description="4-6 point markdown clinical guidance for the treating doctor.")
+
+
+SYSTEM_PROMPT = """You are ShushrutAI, an expert consultant dermatologist and dermatoscopist supporting a qualified physician. You analyze dermatoscopic and clinical skin images and produce structured, clinically rigorous decision-support output.
+
+APPLY THIS FRAMEWORK SYSTEMATICALLY (when an image is available):
+1. Global pattern: reticular, globular, homogeneous, starburst, parallel (acral), multicomponent, or unstructured.
+2. Local features: pigment network (typical vs atypical), dots/globules, streaks/pseudopods, blue-white veil, regression (peppering/scar-like depigmentation), negative network, and vascular morphology (dotted, linear-irregular, arborizing, hairpin, glomerular/coiled, crown).
+3. Algorithms: ABCD rule (Asymmetry, Border, Colour, Dermoscopic structures), the 7-point checklist, Menzies method, and "Chaos & Clues" for pigmented lesions. For non-melanocytic lesions use pattern recognition — BCC (arborizing vessels, leaf-like/spoke-wheel areas, blue-grey ovoid nests), keratinocyte/SCC (keratin, white circles, glomerular vessels), seborrhoeic keratosis (milia-like cysts, comedo-like openings), and vascular lesions (red/purple lacunes).
+4. Melanoma & malignancy vigilance: if features suggest melanoma, BCC, or SCC, state it explicitly and recommend histopathological confirmation (dermoscopy-guided biopsy/excision). Never understate a suspicious lesion.
+
+A convolutional neural network (CNN) has already classified the image. Treat its output as a PRIOR, not ground truth — corroborate or challenge it from the visible dermoscopic evidence. If no image is available to you (fallback path), reason from the CNN predictions and standard dermatology, and state clearly in the remarks that direct visual/dermoscopic confirmation by the clinician is required.
+
+CLINICAL GOVERNANCE:
+- Provide realistic, calibrated confidence — never a blanket 100%.
+- Be explicit about uncertainty and limitations (single view, image quality, absent history/dermoscopy).
+- This is clinician decision support, not a definitive diagnosis; always recommend appropriate confirmatory steps.
+- Do NOT fabricate citations or URLs. Reference guidance at the organisation level (e.g., AAD, NCCN, British Association of Dermatologists, WHO) only.
+
+OUTPUT CONTRACT — return ONLY these fields:
+- verify: ONE comma-separated line "<Healthy|Unhealthy>,<confidence %>,<Dry|Oily|Normal>,<one-line remark>" (no internal newlines).
+- prediction: ONE comma-separated line "<most likely condition>,<confidence %>,<two-line remark>" (no internal newlines). If the skin appears healthy, set the condition to "Healthy".
+- report: a detailed MARKDOWN report with these sections — ### Dermoscopic Observations, ### Differential Diagnosis (with reasoning), ### Brief Pathophysiology, ### Management Plan (pharmacological, procedural, lifestyle/home care), ### Red Flags & When to Refer, ### Prognosis & Follow-up.
+- jarvis: 4-6 markdown bullet points of guidance for the treating doctor — current evidence-based treatments, prescription considerations (drug classes/mechanisms), and the recommended next diagnostic steps.
+
+Write for a physician audience: precise, clinical, and empathetic."""
+
+
+# --------------------------- LangGraph definition --------------------------- #
+class GraphState(TypedDict, total=False):
+    user_text: str
+    image_b64: Optional[str]
+    primary: dict          # CNN top prediction {class, confidence}
+    secondary: dict        # CNN second prediction
+    result: Optional[dict]
+    provider: Optional[str]
+    error: Optional[str]
+
+
+def _gemini_node(state: GraphState) -> GraphState:
+    """Primary: Gemini vision model with structured output over the image."""
+    try:
+        content = [{"type": "text", "text": state["user_text"]}]
+        if state.get("image_b64"):
+            content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{state['image_b64']}"})
+        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]
+        out = gemini_llm.with_structured_output(Analysis).invoke(messages)
+        return {"result": out.model_dump(), "provider": "gemini"}
+    except Exception as e:
+        print(f"[gemini] failed -> falling back to sarvam: {e}")
+        return {"result": None, "error": str(e)}
+
+
+def _sarvam_node(state: GraphState) -> GraphState:
+    """Fallback: Sarvam is text-only + reasoning-heavy, so we build the CSV fields
+    deterministically from the CNN predictions and use Sarvam only for a CONCISE
+    markdown clinical note (it cannot see the image)."""
+    if sarvam_llm is None:
+        return {"result": None, "error": "Sarvam fallback not configured (set SARVAM_API_KEY)."}
+    try:
+        p = state.get("primary") or {}
+        s = state.get("secondary") or {}
+        p_class = p.get("class", "Unknown")
+        p_conf = float(p.get("confidence", 0.0))
+        s_class = s.get("class", "Unknown")
+        conf_pct = int(round(p_conf * 100))
+
+        prompt = (
+            f"A CNN classifier suggests '{p_class}' (confidence {p_conf:.2f}), with "
+            f"'{s_class}' as a secondary possibility. No image is available to you, so rely "
+            "on these predictions and standard dermatology. In UNDER 200 words, produce a "
+            "concise MARKDOWN clinical note with: likely condition, brief reasoning, key "
+            "management (topical/oral/lifestyle), and red flags / when to refer. State clearly "
+            "that direct visual/dermoscopic confirmation by the clinician is required."
+        )
+        resp = sarvam_llm.invoke([
+            SystemMessage(content="You are an expert dermatologist writing for another doctor. Answer directly and concisely, no preamble."),
+            HumanMessage(content=prompt),
+        ])
+        report = (resp.content or "").strip() or "Text-only fallback: report unavailable."
+
+        result = {
+            "verify": f"Unhealthy,{conf_pct},Normal,Text-only fallback — visual confirmation required",
+            "prediction": f"{p_class},{conf_pct},CNN model prediction; direct visual/dermoscopic confirmation by the clinician is required (text-only fallback).",
+            "report": report,
+            "jarvis": ("**Text-only fallback (Sarvam-30b).** The primary vision model was "
+                       "unavailable, so this note is based on the CNN prediction only. Confirm "
+                       "visually/dermoscopically before treatment and consider biopsy if any "
+                       "malignant features are suspected."),
+        }
+        return {"result": result, "provider": "sarvam"}
+    except Exception as e:
+        print(f"[sarvam] failed: {e}")
+        return {"result": None, "error": str(e)}
+
+
+def _route_after_gemini(state: GraphState) -> str:
+    return END if state.get("result") else "sarvam"
+
+
+_graph = StateGraph(GraphState)
+_graph.add_node("gemini", _gemini_node)
+_graph.add_node("sarvam", _sarvam_node)
+_graph.add_edge(START, "gemini")
+_graph.add_conditional_edges("gemini", _route_after_gemini, {"sarvam": "sarvam", END: END})
+_graph.add_edge("sarvam", END)
+analysis_graph = _graph.compile()
+
+
+def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, secondary: dict) -> tuple[dict, str]:
+    state = analysis_graph.invoke({
+        "user_text": user_text,
+        "image_b64": image_b64,
+        "primary": primary,
+        "secondary": secondary,
+    })
+    if not state.get("result"):
+        raise HTTPException(status_code=502, detail=f"AI service error: {state.get('error')}")
+    return state["result"], state.get("provider", "unknown")
+
+
+def answer_question(system_text: str, user_text: str) -> str:
+    """Chatbot text generation with the same Gemini -> Sarvam fallback."""
+    messages = [SystemMessage(content=system_text), HumanMessage(content=user_text)]
+    try:
+        return gemini_llm.invoke(messages).content
+    except Exception as e:
+        print(f"[gemini /ans] failed -> sarvam: {e}")
+        if sarvam_llm is None:
+            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+        return sarvam_llm.invoke(messages).content
+
+
+# --------------------------------------------------------------------------- #
+# App
+# --------------------------------------------------------------------------- #
 class Id(BaseModel):
     obj_id: str
     imageUrl: Optional[str] = None
+
 
 class Query(BaseModel):
     query: str
     deep_search: bool = False
 
-app = FastAPI()
+
+app = FastAPI(title="ShushrutAI")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -118,346 +284,134 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the ShrushrutAI"}
 
+
+def resolve_image_url(obj_id: str, image_url: Optional[str]) -> str:
+    if image_url and image_url.strip():
+        return image_url
+    if db is None:
+        raise HTTPException(status_code=400, detail="No imageUrl provided and Firestore is unavailable.")
+    doc = db.collection("patients").document(obj_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Patient document not found")
+    images = doc.to_dict().get("skinImages", [])
+    if not images:
+        raise HTTPException(status_code=404, detail="No images found in patient record")
+    return images[-1]
+
+
+def fetch_image(image_url: str) -> Image.Image:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp = requests.get(image_url, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+
+
 @app.post("/predict")
-async def classify_image(req: Id):
-    obj_id = req.obj_id
-
-    # Priority 1: Use specific image URL
-    if req.imageUrl and req.imageUrl.strip():
-        image_url = req.imageUrl
-        print(f"Using provided image URL: {image_url}")
-    else:
-        # Priority 2: Fallback to latest
-        def get_latest_skin_image(obj_id: str):
-            try:
-                # Fetch patient document from Firestore
-                doc_ref = db.collection("patients").document(obj_id)
-                doc = doc_ref.get()
-                
-                if doc.exists:
-                    data = doc.to_dict()
-                    skin_images = data.get("skinImages", [])
-                    
-                    if skin_images and len(skin_images) > 0:
-                        image_url = skin_images[-1] # Get the last added image
-                        print(f"Found image URL: {image_url}")
-                        return image_url
-                    else:
-                        print("No images found in patient record")
-                        return None
-                else:
-                    print("Patient document not found")
-                    return None
-            except Exception as e:
-                print(f"Error fetching from Firestore: {e}")
-                return None
-
-        image_url = get_latest_skin_image(obj_id)
-    
-    if not image_url:
-        raise HTTPException(status_code=404, detail="Image not found")
+def classify_image(req: Id):
+    image_url = resolve_image_url(req.obj_id, req.imageUrl)
 
     try:
-        # Enhanced image fetching with headers and retry
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(image_url, headers=headers, timeout=10)
-                response.raise_for_status()
-                break # Success
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"Failed to fetch image after {max_retries} attempts: {e}")
-                    raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
-                print(f"Image fetch failed (attempt {attempt+1}/{max_retries}). Retrying...")
-                time.sleep(1)
+        image = fetch_image(image_url)
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Error fetching image: {e}")
 
-        image = Image.open(BytesIO(response.content)).convert("RGB")
+    # Local CNN predictions -> primary / secondary by confidence.
+    res_c = predict_c(image)
+    res_d = predict_d(image)
+    primary, secondary = (res_c, res_d) if res_c["confidence"] >= res_d["confidence"] else (res_d, res_c)
 
-        # Save image temporarily
-        temp_path = "temp_image.png"
-        image.save(temp_path)
+    # Encode image as JPEG base64 for the vision model.
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
 
-        # Get predictions from models
-        result_c = predict_c(image)
-        result_d = predict_d(image)
+    user_text = (
+        "A skin lesion image has been submitted for analysis. A CNN classifier reports:\n"
+        f"- Primary: {primary['class']} (confidence {primary['confidence']:.2f})\n"
+        f"- Secondary: {secondary['class']} (confidence {secondary['confidence']:.2f})\n\n"
+        "If an image is attached, analyze it dermoscopically using your framework and "
+        "corroborate or challenge the CNN prior. If no image is attached, reason from the "
+        "CNN predictions and note that direct visual confirmation is required. "
+        "Produce the structured analysis exactly as specified."
+    )
 
-        if result_c["confidence"] > result_d["confidence"]:
-            result_pred = result_c
-            minor_result = result_d
-        elif result_d["confidence"] > result_c["confidence"]:
-            result_pred = result_d
-            minor_result = result_c
-        else:
-            result_pred = result_c
-            minor_result = result_d
+    data, provider = run_analysis(user_text, image_b64, primary, secondary)
+    print(f"[analysis] provider={provider}")
 
-        generation_config = {
-            "temperature": 0.4,
-            "top_p": 1,
-            "top_k": 32,
-            "max_output_tokens": 1024,
-        }
+    verify = str(data.get("verify") or "Unknown,0,Normal,No remarks")
+    prediction = str(data.get("prediction") or f"{primary['class']},{primary['confidence'] * 100:.0f},")
+    report = str(data.get("report") or "No detailed report available.")
+    jarvis = str(data.get("jarvis") or "")
 
-        safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_NONE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_NONE"
-            },
-        ]
+    # Attribution footer — which LLM produced this report.
+    provider_label = {"gemini": "Google Gemini", "sarvam": "Sarvam-30b"}.get(provider, provider)
+    report = f"{report}\n\n---\n*🩺 Report generated by ShushrutAI — powered by **{provider_label}**.*"
 
-     
-        # Agent 1: Verify Medical Agent
-        verify_prompt = """Analyze the given skin image as a very good and expert dermatologist to determine if the skin is healthy or unhealthy.
-- Provide a realistic confidence percentage based on visual clarity and distinct presentation of symptoms. Do NOT force it to be 100%.
-- If healthy, classify it as 'Healthy' and provide the confidence level in percentage.
-- If unhealthy, classify it as 'Unhealthy' and provide the confidence level in percentage.
-- Additionally, determine the skin type as one of the following: 'Dry', 'Oily', or 'Normal'.
-- give answer in strictly <classification>,<confidence score in percent>,<skin type>,<remarks : give some remarks that is in one to two lines> format only."""
-        
-        # Open image again for Gemini
-        img = Image.open(temp_path)
-        
-        verify_response = generate_with_retry(
-            prompt=[verify_prompt, img],
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        verify_content = verify_response.text
+    pred_parts = prediction.split(",")
+    diagnosis = pred_parts[0].strip() if pred_parts else primary["class"]
+    try:
+        confidence = float(pred_parts[1].replace("%", "").strip()) / 100 if len(pred_parts) > 1 else primary["confidence"]
+    except (ValueError, IndexError):
+        confidence = primary["confidence"]
 
-        # Agent 2: Unhealthy Skin Agent
-        unhealthy_prompt = f"""Analyze the given skin image as an expert dermatologist. If the skin appears healthy, classify the prediction as 'Healthy' and provide the confidence level. If unhealthy, use the model output to determine the disease. The prediction by deep learning model is {result_pred}. If classified as one of the following: 'Actinic Keratosis', 'Atopic Dermatitis', 'Benign Keratosis', 'Dermatofibroma', 'Melanocytic Nevus', 'Melanoma', 'Squamous Cell Carcinoma', 'Tinea Ringworm Candidiasis', or 'Vascular Lesion', assess the likelihood of skin cancer otherwise its a disease. Provide the disease name, confidence level, and remarks. Additionally, include possible symptoms that might be present for further diagnostic evaluation.
+    result = {
+        "imageUrl": image_url,
+        "verify": verify,
+        "prediction": prediction,
+        "report": report,
+        "jarvis": jarvis,
+        "diagnosis": diagnosis,
+        "confidence": round(confidence, 2),
+        "provider": provider,
+        "timestamp": {"_seconds": int(time.time())},
+    }
 
-Context from previous analysis: {verify_content}
-
-- give answer in strictly <disease>,<confidence score in percent>,<remarks in two to three lines> format only.
-- If the skin appears healthy, classify it as 'Healthy' and provide the confidence level in percentage."""
-
-        pred_response = generate_with_retry(
-            prompt=[unhealthy_prompt, img],
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        pred_content = pred_response.text
-
-        # Intermediate save removed to prevent duplicates - we save everything at the end now.
-
-
-        # Extract filename from URL for report
-        image_name = image_url.split('/')[-1] if image_url else "Unknown"
-
-        # Agent 3: Report Agent
-
-        report_prompt = f"""
-        Act as a senior consultant dermatologist. Generate a highly detailed and comprehensive medical report for the following case.
-        
-        **Patient Analysis Context:**
-        - Suspected Condition: {result_pred['class']} (Confidence: {result_pred['confidence']:.2f})
-        - Secondary Possibility: {minor_result['class']} (Confidence: {minor_result['confidence']:.2f})
-        - Initial Assessment: {verify_content}
-        
-        **Required Report Structure (Use Markdown):**
-
-        ### 1. Detailed Clinical Observations
-        - Describe lesion morphology (size, color, texture, borders).
-        - Note anatomical location and distribution patterns.
-        - Mention any visible signs of inflammation, scaling, or ulceration.
-
-        ### 2. Differential Diagnosis & Reasoning
-        - **Primary Diagnosis**: Explain why {result_pred['class']} is the most likely diagnosis based on visual evidence.
-        - **Differentials**: List 2-3 other conditions that share similar features but are less likely, and explain why.
-
-        ### 3. Pathophysiology (Brief)
-        - Explain the underlying biological mechanism of the primary condition.
-
-        ### 4. Comprehensive Management Plan
-        - **Pharmacological**: Suggest specific generic classes of topical/oral medications (e.g., "Topical corticosteroids", "Antifungals").
-        - **Lifestyle & Hygiene**: Specific advice on skincare, diet, and triggers.
-        - **Home Care**: Actionable steps for the patient.
-
-        ### 5. Prognosis & Follow-up
-        - Expected course of the condition.
-        - Warning signs that require immediate medical attention.
-
-        **Tone:** Professional, clinical, and empathetic.
-        **Format:** strictly markdown, no preamble.
-        """
-
-        report_response = generate_with_retry(
-            prompt=[report_prompt, img],
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        report_content = report_response.text
-
-        # Agent 4: Jarvis Agent
-        jarvis_prompt = f"""You are an AI-powered Dermatology Voice Assistant, designed to provide expert-level support to dermatologists. Your role is to analyze report {report_content} recommend evidence-based treatments, and guide doctors on the next steps using the latest research and drug discoveries.
-
-The most likely condition the patient could have is **{result_pred['class']}** with a confidence of {result_pred['confidence']:.2f}.
-Additionally, there is a minor possibility of **{minor_result['class']}** with a confidence of {minor_result['confidence']:.2f}.
-
-**Remarks:**
-- **{result_pred['class']}** (Confidence: {result_pred['confidence']:.2f}) is the primary concern and should be prioritized for diagnosis and treatment.
-- **{minor_result['class']}** (Confidence: {minor_result['confidence']:.2f}) may be a secondary condition or share similar symptoms. Further medical evaluation is recommended to rule it out.
-
-### 1️⃣ Understand & Analyze the Case
-- Listen to the doctor's query about a patient's condition.
-- Identify the disease or condition being discussed.
-- Analyze symptoms, affected areas, and disease progression based on the given context or medical report.
-
-### 2️⃣ Provide the Latest Treatment Recommendations
-- Fetch current treatment guidelines, FDA-approved drugs, and clinical trials using web sources.
-- Explain the best available treatment options, including topical, oral, biologic, and advanced therapies.
-- Compare traditional treatments with newly discovered therapies (e.g., AI-assisted skin diagnostics, gene therapy, biologics).
-
-### 3️⃣ Generate a Complete Prescription Plan
-- Suggest medications, dosages, frequency, and possible side effects.
-- Recommend adjunct therapies, such as lifestyle modifications and skincare routines.
-- Warn about contraindications or potential drug interactions.
-
-### 4️⃣ Guide the Doctor on the Next Steps
-- Recommend further diagnostic tests (e.g., biopsy, dermoscopy, blood tests, genetic markers).
-- Suggest patient follow-up intervals and monitoring plans.
-- Provide guidelines for managing severe or resistant cases.
-
-### 5️⃣ Provide Reliable Medical Sources & Links
-- Fetch research-backed insights from trusted sources such as PubMed, JAMA Dermatology, The Lancet, FDA, and WHO.
-- Offer links to the latest studies, treatment guidelines, and clinical trials for validation.
-
-Context: {pred_content}
-
-Instructions should be understandable by Dermatologists not for layman audience and make it like a professional advice to doctor like doctor is giving advice to the other doctor and make complete instruction summarize and in 4 to 5 lines pointwise.
-- give answer in proper markdown format."""
-
-        jarvis_response = generate_with_retry(
-            prompt=jarvis_prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-        jarvis_content = jarvis_response.text
-
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-
-        # Update the report with final generated content
+    if db is not None:
         try:
-            # Find the latest report we just added (using a query since we didn't save the ref ID, 
-            # or better yet, we should have saved the ref. But for now, let's just add a new one or update latest)
-            # Actually, let's just do a fire-and-forget update to the latest document we *should* have tracked.
-            # To be safe and simple: let's just write EVERYTHING at the end instead of the middle.
-            
-            final_report_data = {
-                "patientId": obj_id,
+            saved = {
+                "patientId": req.obj_id,
                 "timestamp": firestore.SERVER_TIMESTAMP,
                 "imageUrl": image_url,
-                "verify": verify_content,
-                "prediction": pred_content,
-                "report": report_content,
-                "jarvis": jarvis_content
+                "verify": verify,
+                "prediction": prediction,
+                "report": report,
+                "jarvis": jarvis,
             }
-            
-            # Save to subcollection
-            db.collection("patients").document(obj_id).collection("reports").add(final_report_data)
-            
-            # Update latest context
-            db.collection("diagnoses").document("latest").set(final_report_data)
-
+            db.collection("patients").document(req.obj_id).collection("reports").add(saved)
+            db.collection("diagnoses").document("latest").set(saved)
         except Exception as e:
-            print(f"Error saving final report to Firestore: {e}")
+            print(f"[warn] Could not save report to Firestore: {e}")
 
-        return {
-            "imageUrl": image_url,
-            "verify": verify_content,
-            "prediction": pred_content,
-            "report": report_content,
-            "jarvis": jarvis_content
-        }
-
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    return result
 
 
 @app.post("/ans")
-async def get_ans(q: Query):
-    try:
-        # Fetch latest diagnosis context from Firestore
-        doc_ref = db.collection("diagnoses").document("latest")
-        doc = doc_ref.get()
-        if doc.exists:
-            mongo_pred = doc.to_dict().get("pred", "")
-        else:
-            mongo_pred = ""
-    except Exception:
-        mongo_pred = ""
+def get_ans(q: Query):
+    context = ""
+    if db is not None:
+        try:
+            doc = db.collection("diagnoses").document("latest").get()
+            if doc.exists:
+                d = doc.to_dict()
+                context = d.get("prediction", "") or d.get("report", "")
+        except Exception:
+            context = ""
 
-    generation_config = {
-        "temperature": 0.4,
-        "top_p": 1,
-        "top_k": 32,
-        "max_output_tokens": 1024,
-    }
-
-    safety_settings = [
-        {
-            "category": "HARM_CATEGORY_HARASSMENT",
-            "threshold": "BLOCK_NONE"
-        },
-        {
-            "category": "HARM_CATEGORY_HATE_SPEECH",
-            "threshold": "BLOCK_NONE"
-        },
-        {
-            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            "threshold": "BLOCK_NONE"
-        },
-        {
-            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-            "threshold": "BLOCK_NONE"
-        },
-    ]
-
-    ans_prompt = f"""Analyze the given question as an expert dermatologist.
-Diagnosis context: {mongo_pred if mongo_pred else 'No context available'}.
-Question: {q.query}
-- Provide concise answer.
-- Include references."""
-
-    # Use global retry function with fallback support
-    response = generate_with_retry(
-        prompt=ans_prompt,
-        generation_config=generation_config,
-        safety_settings=safety_settings
+    system_text = (
+        "You are ShushrutAI, an expert dermatologist assistant answering another doctor. "
+        "Give concise, evidence-based, professional answers. Reference guidance at the "
+        "organisation level (AAD, NCCN, BAD, WHO); do not fabricate URLs."
     )
-    return {"response": response.text}
+    user_text = f"Diagnosis context: {context or 'No context available'}.\n\nQuestion: {q.query}"
+    return {"response": answer_question(system_text, user_text)}
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 6700))
-    uvicorn.run('main:app', host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
