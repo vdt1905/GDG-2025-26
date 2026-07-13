@@ -8,8 +8,8 @@ requests
 certifi
 numpy
 scikit-learn
-torch==2.11.0+cpu
-torchvision==0.26.0+cpu
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
 Pillow
 firebase-admin
 pydantic>=2.0.0

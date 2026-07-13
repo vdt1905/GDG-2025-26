@@ -1,22 +1,29 @@
-# Render Blueprint for the ShushrutAI Python AI server (FastAPI + PyTorch).
+# Render Blueprint for the ShushrutAI Python AI server (FastAPI + LangGraph + PyTorch).
 # Deploy: Render Dashboard -> New -> Blueprint, and point it at the repo.
-# NOTE: Root Directory MUST be GDG-2025-26/PYTHON so the relative model paths
-# ("./models/...") and "from notebooks.model import ..." resolve correctly.
+# NOTE: Root Directory MUST be the PYTHON folder (your Git repo root is GDG-2025-26,
+# which contains PYTHON/ directly) so the relative model paths ("./models/...") and
+# "from notebooks.model import ..." resolve correctly.
+#
+# IMPORTANT: the entrypoint is main:app (NOT main2:app — main2 is the deprecated
+# Google-ADK version and will fail with "No module named 'google.adk'").
 services:
   - type: web
     name: shushrutai-python
     runtime: python
-    rootDir: GDG-2025-26/PYTHON
+    rootDir: PYTHON
     # Free tier (512MB) may OOM with two torch models loaded — upgrade to
     # "starter" if the service crashes on boot or during /predict.
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # gunicorn + uvicorn worker, long timeout because Gemini calls can take 30-60s.
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT -w 1 -k uvicorn.workers.UvicornWorker --timeout 120
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.9"
+        value: "3.12.4"
       - key: GOOGLE_API_KEY
         sync: false          # set in dashboard (secret)
+      - key: SARVAM_API_KEY
+        sync: false          # set in dashboard (secret) — fallback LLM
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false          # set in dashboard: minified serviceAccountKey.json
