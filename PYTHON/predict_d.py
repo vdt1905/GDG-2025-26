@@ -1,65 +1,54 @@
-import torch
-from torchvision import models, transforms
-from PIL import Image
-from io import BytesIO
+"""Skin-disease classifier D (DenseNet121) — ONNX Runtime inference.
+
+Exported from model_epoch_25.pth to ONNX so the server runs without torch.
+Predictions match the torch version (validated: same class, conf diff ~4e-4).
+
+NOTE: the ONNX graph is exported at a fixed 256x256 input (memory-safe). To use a
+different resolution you must re-export the model at that size.
+"""
 import os
+import numpy as np
+from PIL import Image
+import onnxruntime as ort
 
-
-
-
-def load_model(weights_path, num_classes):
-    model = models.densenet121(weights=None)
-    num_features = model.classifier.in_features
-    model.classifier = torch.nn.Sequential(
-        torch.nn.Linear(num_features, 512),
-        torch.nn.ReLU(),
-        torch.nn.Dropout(0.4),
-        torch.nn.Linear(512, 256),
-        torch.nn.ReLU(),
-        torch.nn.Dropout(0.3),
-        torch.nn.Linear(256, num_classes)
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=False))
-    model.to(device)
-    model.eval()
-    return model
-
-
-# Load model once at startup to save memory and time
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-_weights_path = os.path.join(os.path.dirname(__file__), "models", "model_epoch_25.pth") if os.path.exists(os.path.join(os.path.dirname(__file__), "models", "model_epoch_25.pth")) else r"./models/model_epoch_25.pth"
-_GLOBAL_MODEL_D = load_model(_weights_path, num_classes=23)
-
-def predict_d(image: Image.Image):
-    class_names = [
-    "Acne and Rosacea Photos", "Actinic Keratosis Basal Cell Carcinoma and other Malignant Lesions",
-    "Atopic Dermatitis Photos", "Bullous Disease Photos", "Cellulitis Impetigo and other Bacterial Infections",
-    "Eczema Photos", "Exanthems and Drug Eruptions", "Hair Loss Photos Alopecia and other Hair Diseases",
+CLASS_NAMES = [
+    "Acne and Rosacea Photos",
+    "Actinic Keratosis Basal Cell Carcinoma and other Malignant Lesions",
+    "Atopic Dermatitis Photos", "Bullous Disease Photos",
+    "Cellulitis Impetigo and other Bacterial Infections",
+    "Eczema Photos", "Exanthems and Drug Eruptions",
+    "Hair Loss Photos Alopecia and other Hair Diseases",
     "Herpes HPV and other STDs Photos", "Light Diseases and Disorders of Pigmentation",
     "Lupus and other Connective Tissue diseases", "Melanoma Skin Cancer Nevi and Moles",
     "Nail Fungus and other Nail Disease", "Poison Ivy Photos and other Contact Dermatitis",
-    "Psoriasis pictures Lichen Planus and related diseases", "Scabies Lyme Disease and other Infestations and Bites",
-    "Seborrheic Keratoses and other Benign Tumors", "Systemic Disease", "Tinea Ringworm Candidiasis and other Fungal Infections",
-    "Urticaria Hives", "Vascular Tumors", "Vasculitis Photos", "Warts Molluscum and other Viral Infections"
-    ]
-    
-    # Input size is env-configurable. densenet121 at 512x512 spikes activation memory
-    # and OOMs a 512MB host, so we default to 256 (roughly 1/4 the memory). Set
-    # DENSENET_INPUT_SIZE=512 on a larger instance (>=2GB) to restore full resolution.
-    _size = int(os.environ.get("DENSENET_INPUT_SIZE", "256"))
-    transform = transforms.Compose([
-        transforms.Resize((_size, _size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    "Psoriasis pictures Lichen Planus and related diseases",
+    "Scabies Lyme Disease and other Infestations and Bites",
+    "Seborrheic Keratoses and other Benign Tumors", "Systemic Disease",
+    "Tinea Ringworm Candidiasis and other Fungal Infections",
+    "Urticaria Hives", "Vascular Tumors", "Vasculitis Photos",
+    "Warts Molluscum and other Viral Infections",
+]
 
-    input_tensor = transform(image).unsqueeze(0).to(DEVICE)
-    with torch.inference_mode():
-        output = _GLOBAL_MODEL_D(input_tensor)
-        probabilities = torch.softmax(output, dim=1)
-        predicted_class = torch.argmax(probabilities, dim=1).item()
-        confidence = probabilities[0, predicted_class].item()
-    del input_tensor, output, probabilities
-    return {"class": class_names[predicted_class], "confidence": confidence}
+_INPUT_SIZE = 256  # must match the ONNX export size
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "skin_d.onnx")
+_session = ort.InferenceSession(_MODEL_PATH, providers=["CPUExecutionProvider"])
+_input_name = _session.get_inputs()[0].name
 
+_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+
+
+def _softmax(x):
+    e = np.exp(x - np.max(x))
+    return e / e.sum()
+
+
+def predict_d(image: Image.Image):
+    # Matches the original transform: Resize + ToTensor + Normalize(ImageNet).
+    img = image.convert("RGB").resize((_INPUT_SIZE, _INPUT_SIZE), Image.BILINEAR)
+    arr = (np.asarray(img, dtype=np.float32) / 255.0).transpose(2, 0, 1)
+    arr = ((arr - _MEAN) / _STD)[None]
+    logits = _session.run(None, {_input_name: arr})[0][0]
+    probs = _softmax(logits)
+    idx = int(np.argmax(probs))
+    return {"class": CLASS_NAMES[idx], "confidence": float(probs[idx])}

@@ -11,8 +11,8 @@ services:
     name: shushrutai-python
     runtime: python
     rootDir: PYTHON
-    # Free tier (512MB) may OOM with two torch models loaded — upgrade to
-    # "starter" if the service crashes on boot or during /predict.
+    # Runs in ~200MB RAM (ONNX Runtime, no torch), so the free/starter 512MB tier
+    # is fine. Note: the free tier still SLEEPS after ~15 min idle (cold start ~30s).
     plan: starter
     buildCommand: pip install -r requirements.txt
     # gunicorn + uvicorn worker, long timeout because Gemini calls can take 30-60s.

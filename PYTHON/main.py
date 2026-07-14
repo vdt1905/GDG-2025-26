@@ -1,16 +1,16 @@
 """
-ShushrutAI — skin-image analysis API (LangGraph edition).
+ShushrutAI — skin-image analysis API (LangGraph + ONNX, lightweight edition).
 
-Pipeline (per /predict) — unchanged flow, new LLM layer:
-  1. Resolve the image URL (from the request, or the patient's latest skin image).
-  2. Run the local PyTorch classifiers (predict_c + predict_d) for a suspected class.
-  3. Run a LangGraph graph that produces ONE structured analysis JSON:
-        gemini (vision, primary)  --on failure-->  sarvam (text, fallback)
-     returning {verify, prediction, report, jarvis}.
-  4. Save the report to Firestore and return it to the frontend.
+Designed to run in ~200MB RAM (fits a 512MB host):
+  - CNN inference via ONNX Runtime (no torch -> ~5x less memory).
+  - LLM calls via direct HTTP (no heavy langchain provider SDKs).
+  - LangGraph orchestrates the Gemini(vision) -> Sarvam(text fallback) flow.
 
-Note: Sarvam is a text-only model and cannot see the image. On the fallback path it
-reasons from the CNN predictions only and flags that visual confirmation is required.
+Pipeline (per /predict):
+  1. Resolve the image URL (request, or the patient's latest skin image).
+  2. Run the local ONNX classifiers (predict_c + predict_d).
+  3. LangGraph: gemini (vision, primary) --on failure--> sarvam-30b (text fallback).
+  4. Save the report to Firestore and return it.
 """
 
 import os
@@ -25,12 +25,10 @@ from typing import Optional, TypedDict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
-import gc
-import torch
-torch.set_num_threads(1)  # limit CPU/memory footprint on small hosts (Render 512MB)
+from langgraph.graph import StateGraph, START, END
 
 from predict_c import predict_c
 from predict_d import predict_d
@@ -38,9 +36,8 @@ from predict_d import predict_d
 load_dotenv()
 
 # --------------------------------------------------------------------------- #
-# TLS: build one CA bundle = certifi + OS (Windows) root store, so `requests`
-# AND the LangChain/Gemini REST client verify HTTPS even when an antivirus/proxy
-# intercepts traffic with a root that isn't in certifi. No-op on Linux.
+# TLS: certifi + OS (Windows) root store, so `requests` verifies HTTPS even when
+# an antivirus/proxy intercepts traffic. No-op / harmless on Linux (Render).
 # --------------------------------------------------------------------------- #
 def _build_ca_bundle():
     import ssl, tempfile, certifi
@@ -63,12 +60,11 @@ def _build_ca_bundle():
     return path
 
 _CA_BUNDLE = _build_ca_bundle()
-os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)         # openssl / stdlib ssl
-os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA_BUNDLE)    # requests / httpx
-os.environ.setdefault("GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", _CA_BUNDLE)  # gRPC (Firestore)
+os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)
+os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA_BUNDLE)
 
 # --------------------------------------------------------------------------- #
-# Firebase (optional — only needed to auto-resolve images / save reports)
+# Firebase (optional — only for auto-resolving images / saving reports)
 # --------------------------------------------------------------------------- #
 db = None
 try:
@@ -88,53 +84,26 @@ except Exception as e:
     print(f"[warn] Firebase not initialized ({e}). /predict still works when imageUrl is passed directly.")
 
 # --------------------------------------------------------------------------- #
-# LLM providers via LangChain + orchestration via LangGraph
+# LLM providers via direct HTTP
 # --------------------------------------------------------------------------- #
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, START, END
-
-try:
-    from langchain_openai import ChatOpenAI
-except Exception:  # langchain-openai not installed
-    ChatOpenAI = None
-
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-# Sarvam is OpenAI-compatible (https://api.sarvam.ai/v1). Options: sarvam-30b, sarvam-105b.
 SARVAM_MODEL = os.getenv("SARVAM_MODEL", "sarvam-30b")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v1")
 
-gemini_llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GOOGLE_API_KEY,
-    temperature=0.3,
-    max_output_tokens=8192,
-)
-
-sarvam_llm = None
-if SARVAM_API_KEY and ChatOpenAI is not None:
-    # sarvam-30b is a reasoning model that spends its completion budget "thinking",
-    # so we cap reasoning (reasoning_effort=low) and ask it only for a CONCISE note.
-    sarvam_llm = ChatOpenAI(
-        model=SARVAM_MODEL,
-        base_url=SARVAM_BASE_URL,
-        api_key=SARVAM_API_KEY,
-        temperature=0.3,
-        max_tokens=4000,
-        extra_body={"reasoning_effort": "low"},
-    )
-
-
-class Analysis(BaseModel):
-    """Structured analysis contract shared by both providers."""
-    verify: str = Field(description="Single line: '<Healthy|Unhealthy>,<confidence %>,<Dry|Oily|Normal>,<one-line remark>'")
-    prediction: str = Field(description="Single line: '<most likely condition>,<confidence %>,<two-line remark>'")
-    report: str = Field(description="Detailed markdown clinical report.")
-    jarvis: str = Field(description="4-6 point markdown clinical guidance for the treating doctor.")
-
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verify": {"type": "string"},
+        "prediction": {"type": "string"},
+        "report": {"type": "string"},
+        "jarvis": {"type": "string"},
+    },
+    "required": ["verify", "prediction", "report", "jarvis"],
+}
 
 SYSTEM_PROMPT = """You are ShushrutAI, an expert consultant dermatologist and dermatoscopist supporting a qualified physician. You analyze dermatoscopic and clinical skin images and produce structured, clinically rigorous decision-support output.
 
@@ -161,36 +130,92 @@ OUTPUT CONTRACT — return ONLY these fields:
 Write for a physician audience: precise, clinical, and empathetic."""
 
 
+def _loads_lenient(text: str) -> dict:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(text, strict=False)
+
+
+def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[str]) -> dict:
+    """Gemini vision call returning structured JSON (verify/prediction/report/jarvis)."""
+    parts = [{"text": user_text}]
+    if image_b64:
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": image_b64}})
+    body = {
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 8192,
+            "responseMimeType": "application/json",
+            "responseSchema": _RESPONSE_SCHEMA,
+        },
+    }
+    r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
+    r.raise_for_status()
+    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return _loads_lenient(text)
+
+
+def gemini_generate_text(system_text: str, user_text: str) -> str:
+    """Plain-text Gemini call (chatbot)."""
+    body = {
+        "systemInstruction": {"parts": [{"text": system_text}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+    }
+    r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
+    r.raise_for_status()
+    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def sarvam_generate_text(system_text: str, user_text: str) -> str:
+    """Sarvam (OpenAI-compatible, text-only, reasoning-capped) call."""
+    body = {
+        "model": SARVAM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4000,
+        "reasoning_effort": "low",
+    }
+    headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
+    r = requests.post(f"{SARVAM_BASE_URL}/chat/completions", json=body, headers=headers, timeout=90)
+    r.raise_for_status()
+    return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+
 # --------------------------- LangGraph definition --------------------------- #
 class GraphState(TypedDict, total=False):
     user_text: str
     image_b64: Optional[str]
-    primary: dict          # CNN top prediction {class, confidence}
-    secondary: dict        # CNN second prediction
+    primary: dict
+    secondary: dict
     result: Optional[dict]
     provider: Optional[str]
     error: Optional[str]
 
 
 def _gemini_node(state: GraphState) -> GraphState:
-    """Primary: Gemini vision model with structured output over the image."""
     try:
-        content = [{"type": "text", "text": state["user_text"]}]
-        if state.get("image_b64"):
-            content.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{state['image_b64']}"})
-        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]
-        out = gemini_llm.with_structured_output(Analysis).invoke(messages)
-        return {"result": out.model_dump(), "provider": "gemini"}
+        data = gemini_generate_json(SYSTEM_PROMPT, state["user_text"], state.get("image_b64"))
+        return {"result": data, "provider": "gemini"}
     except Exception as e:
         print(f"[gemini] failed -> falling back to sarvam: {e}")
         return {"result": None, "error": str(e)}
 
 
 def _sarvam_node(state: GraphState) -> GraphState:
-    """Fallback: Sarvam is text-only + reasoning-heavy, so we build the CSV fields
-    deterministically from the CNN predictions and use Sarvam only for a CONCISE
-    markdown clinical note (it cannot see the image)."""
-    if sarvam_llm is None:
+    """Text-only fallback: build CSV fields from CNN, use Sarvam for a concise report."""
+    if not SARVAM_API_KEY:
         return {"result": None, "error": "Sarvam fallback not configured (set SARVAM_API_KEY)."}
     try:
         p = state.get("primary") or {}
@@ -208,11 +233,10 @@ def _sarvam_node(state: GraphState) -> GraphState:
             "management (topical/oral/lifestyle), and red flags / when to refer. State clearly "
             "that direct visual/dermoscopic confirmation by the clinician is required."
         )
-        resp = sarvam_llm.invoke([
-            SystemMessage(content="You are an expert dermatologist writing for another doctor. Answer directly and concisely, no preamble."),
-            HumanMessage(content=prompt),
-        ])
-        report = (resp.content or "").strip() or "Text-only fallback: report unavailable."
+        report = sarvam_generate_text(
+            "You are an expert dermatologist writing for another doctor. Answer directly and concisely, no preamble.",
+            prompt,
+        ) or "Text-only fallback: report unavailable."
 
         result = {
             "verify": f"Unhealthy,{conf_pct},Normal,Text-only fallback — visual confirmation required",
@@ -244,10 +268,8 @@ analysis_graph = _graph.compile()
 
 def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, secondary: dict) -> tuple[dict, str]:
     state = analysis_graph.invoke({
-        "user_text": user_text,
-        "image_b64": image_b64,
-        "primary": primary,
-        "secondary": secondary,
+        "user_text": user_text, "image_b64": image_b64,
+        "primary": primary, "secondary": secondary,
     })
     if not state.get("result"):
         raise HTTPException(status_code=502, detail=f"AI service error: {state.get('error')}")
@@ -255,15 +277,13 @@ def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, second
 
 
 def answer_question(system_text: str, user_text: str) -> str:
-    """Chatbot text generation with the same Gemini -> Sarvam fallback."""
-    messages = [SystemMessage(content=system_text), HumanMessage(content=user_text)]
     try:
-        return gemini_llm.invoke(messages).content
+        return gemini_generate_text(system_text, user_text)
     except Exception as e:
         print(f"[gemini /ans] failed -> sarvam: {e}")
-        if sarvam_llm is None:
+        if not SARVAM_API_KEY:
             raise HTTPException(status_code=502, detail=f"AI service error: {e}")
-        return sarvam_llm.invoke(messages).content
+        return sarvam_generate_text(system_text, user_text)
 
 
 # --------------------------------------------------------------------------- #
@@ -324,13 +344,10 @@ def classify_image(req: Id):
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Error fetching image: {e}")
 
-    # Local CNN predictions -> primary / secondary by confidence.
     res_c = predict_c(image)
     res_d = predict_d(image)
-    gc.collect()  # free inference tensors before the LLM call
     primary, secondary = (res_c, res_d) if res_c["confidence"] >= res_d["confidence"] else (res_d, res_c)
 
-    # Encode image as JPEG base64 for the vision model.
     buf = io.BytesIO()
     image.save(buf, format="JPEG")
     image_b64 = base64.b64encode(buf.getvalue()).decode()
@@ -353,7 +370,6 @@ def classify_image(req: Id):
     report = str(data.get("report") or "No detailed report available.")
     jarvis = str(data.get("jarvis") or "")
 
-    # Attribution footer — which LLM produced this report.
     provider_label = {"gemini": "Google Gemini", "sarvam": "Sarvam-30b"}.get(provider, provider)
     report = f"{report}\n\n---\n*🩺 Report generated by ShushrutAI — powered by **{provider_label}**.*"
 
@@ -382,10 +398,8 @@ def classify_image(req: Id):
                 "patientId": req.obj_id,
                 "timestamp": firestore.SERVER_TIMESTAMP,
                 "imageUrl": image_url,
-                "verify": verify,
-                "prediction": prediction,
-                "report": report,
-                "jarvis": jarvis,
+                "verify": verify, "prediction": prediction,
+                "report": report, "jarvis": jarvis,
             }
             db.collection("patients").document(req.obj_id).collection("reports").add(saved)
             db.collection("diagnoses").document("latest").set(saved)
