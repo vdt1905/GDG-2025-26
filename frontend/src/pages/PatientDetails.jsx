@@ -9,6 +9,7 @@ import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { jsPDF } from "jspdf";
 import ReactMarkdown from 'react-markdown';
+import PLACEHOLDER_IMAGE, { onImageError } from "../lib/placeholderImage";
 
 // Simple Circular Progress Component
 const CircularProgress = ({ value, label, subLabel, color = "text-teal-600" }) => {
@@ -517,7 +518,7 @@ export default function PatientDetails() {
                                     className="w-24 h-24 rounded-full bg-slate-100 mb-4 overflow-hidden border-4 border-white shadow-sm"
                                 >
                                     {patient.profileImage || patient.imageUrl ? (
-                                        <img src={patient.profileImage || patient.imageUrl} alt={patient.name} className="w-full h-full object-cover" />
+                                        <img src={patient.profileImage || patient.imageUrl} alt={patient.name} onError={onImageError} className="w-full h-full object-cover" />
                                     ) : (
                                         <User className="w-10 h-10 text-slate-400 m-auto mt-6" />
                                     )}
@@ -778,8 +779,9 @@ export default function PatientDetails() {
                                     <div className="md:col-span-1 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
                                         <div className="aspect-square rounded-lg overflow-hidden bg-slate-100 relative">
                                             <img
-                                                src={previewReport.imageUrl || patient?.imageUrl || "/placeholder.png"}
+                                                src={previewReport.imageUrl || patient?.imageUrl || PLACEHOLDER_IMAGE}
                                                 alt="Medical Scan"
+                                                onError={onImageError}
                                                 className="w-full h-full object-cover"
                                             />
                                             <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded backdrop-blur-sm">

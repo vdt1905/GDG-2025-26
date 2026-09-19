@@ -37,5 +37,13 @@ def predict_c(image: Image.Image):
     arr = (np.asarray(img, dtype=np.float32) / 255.0).transpose(2, 0, 1)[None]
     logits = _session.run(None, {_input_name: arr})[0][0]
     probs = _softmax(logits)
-    idx = int(np.argmax(probs))
-    return {"class": CLASS_NAMES[idx], "confidence": float(probs[idx])}
+    order = np.argsort(probs)[::-1]
+    idx, second = int(order[0]), int(order[1])
+    # Closed-set classifier: there is no "healthy" class, so it always names a
+    # disease. The runner-up + margin let the LLM see when the model is guessing.
+    return {
+        "class": CLASS_NAMES[idx],
+        "confidence": float(probs[idx]),
+        "runner_up": CLASS_NAMES[second],
+        "runner_up_confidence": float(probs[second]),
+    }

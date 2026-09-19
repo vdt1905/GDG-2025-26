@@ -1,59 +1,44 @@
 import Layout from "../components/Layout";
-import { Users, UserPlus, Image as ImageIcon, TrendingUp, Calendar, Loader2 } from "lucide-react";
-import React, { useEffect, useState } from "react";
-import api from "../lib/axios";
+import { Users, UserPlus, Image as ImageIcon, TrendingUp, Calendar } from "lucide-react";
+import React, { useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import useAuthStore from "../store/authStore";
+import usePatientsStore from "../store/patientsStore";
 
 export default function Dashboard() {
     const { currentUser } = useAuthStore();
-    const [patients, setPatients] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [stats, setStats] = useState([
-        { label: "Total Patients", value: "0", icon: Users, color: "text-blue-600", bg: "bg-blue-100" },
-        { label: "New This Month", value: "0", icon: UserPlus, color: "text-teal-600", bg: "bg-teal-100" },
-        { label: "Images Uploaded", value: "0", icon: ImageIcon, color: "text-purple-600", bg: "bg-purple-100" },
-    ]);
+    const patients = usePatientsStore((state) => state.patients);
+    const loaded = usePatientsStore((state) => state.loaded);
+    const error = usePatientsStore((state) => state.error);
+    const fetchPatients = usePatientsStore((state) => state.fetchPatients);
+    // Render the page straight away; only the numbers and list wait for data.
+    const ready = loaded || Boolean(error);
 
+    // Revalidate on every visit. If App.jsx's prefetch is still in flight this
+    // joins it rather than starting a second request.
     useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const res = await api.get("/patients");
-                const data = res.data;
-                setPatients(data);
+        fetchPatients();
+    }, [fetchPatients]);
 
-                // Calculate Stats
-                const totalPatients = data.length;
+    const stats = useMemo(() => {
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const newThisMonth = patients.filter(p => new Date(p.createdAt) >= startOfMonth).length;
+        const totalImages = patients.reduce((acc, curr) => {
+            let count = 0;
+            if (curr.profileImage) count++;
+            if (curr.skinImages && Array.isArray(curr.skinImages)) count += curr.skinImages.length;
+            return acc + count;
+        }, 0);
+        const show = (n) => (ready ? n.toString() : "—");
 
-                const now = new Date();
-                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-                const newThisMonth = data.filter(p => new Date(p.createdAt) >= startOfMonth).length;
-
-                const totalImages = data.reduce((acc, curr) => {
-                    let count = 0;
-                    if (curr.profileImage) count++;
-                    if (curr.skinImages && Array.isArray(curr.skinImages)) count += curr.skinImages.length;
-                    return acc + count;
-                }, 0);
-
-                setStats([
-                    { label: "Total Patients", value: totalPatients.toString(), icon: Users, color: "text-blue-600", bg: "bg-blue-100" },
-                    { label: "New This Month", value: newThisMonth.toString(), icon: UserPlus, color: "text-teal-600", bg: "bg-teal-100" },
-                    { label: "Images Uploaded", value: totalImages.toString(), icon: ImageIcon, color: "text-purple-600", bg: "bg-purple-100" },
-                ]);
-
-            } catch (error) {
-                console.error("Error fetching dashboard data:", error);
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        fetchData();
-    }, []);
-
-    if (loading) return <Layout><div className="flex justify-center p-20"><Loader2 className="animate-spin text-teal-600" /></div></Layout>;
+        return [
+            { label: "Total Patients", value: show(patients.length), icon: Users, color: "text-blue-600", bg: "bg-blue-100" },
+            { label: "New This Month", value: show(newThisMonth), icon: UserPlus, color: "text-teal-600", bg: "bg-teal-100" },
+            { label: "Images Uploaded", value: show(totalImages), icon: ImageIcon, color: "text-purple-600", bg: "bg-purple-100" },
+        ];
+    }, [patients, ready]);
 
     const container = {
         hidden: { opacity: 0 },
@@ -92,7 +77,9 @@ export default function Dashboard() {
                             </span>
                         </h1>
                         <p className="text-slate-500 text-lg max-w-xl font-medium">
-                            Overview of your practice. You have <strong className="text-emerald-700">{stats[1].value} new patients</strong> this month.
+                            {ready
+                                ? <>Overview of your practice. You have <strong className="text-emerald-700">{stats[1].value} new patients</strong> this month.</>
+                                : "Loading your practice overview…"}
                         </p>
                     </div>
                 </div>
@@ -202,9 +189,21 @@ export default function Dashboard() {
                                         </motion.div>
                                     </Link>
                                 ))
+                            ) : !ready ? (
+                                [0, 1, 2].map((i) => (
+                                    <div key={i} className="flex items-center p-4 rounded-2xl border border-slate-100 bg-white animate-pulse" aria-hidden="true">
+                                        <div className="w-12 h-12 rounded-2xl bg-slate-100 mr-5" />
+                                        <div className="flex-1 space-y-2">
+                                            <div className="h-3.5 w-40 rounded bg-slate-100" />
+                                            <div className="h-2.5 w-24 rounded bg-slate-100" />
+                                        </div>
+                                    </div>
+                                ))
                             ) : (
                                 <div className="text-center py-12 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                                    <p className="text-slate-400 font-medium italic">No recent activity found.</p>
+                                    <p className="text-slate-400 font-medium italic">
+                                        {error ? "Couldn't load recent patients. Refresh to try again." : "No recent activity found."}
+                                    </p>
                                 </div>
                             )}
                         </div>

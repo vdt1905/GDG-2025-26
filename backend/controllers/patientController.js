@@ -14,11 +14,8 @@ const getPatients = async (req, res) => {
 
         console.log("Found patient docs:", snapshot.empty ? 0 : snapshot.docs.length);
 
-        let patients = snapshot.docs.map(doc => {
-            const data = doc.data();
-            console.log(`- Patient: ${data.name}, CreatedBy: ${data.createdBy || data.doctordId || 'MISSING'}`);
-            return { id: doc.id, ...data };
-        });
+        // No per-patient logging: it wrote patient names to the Vercel logs on every request.
+        let patients = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
         // Sort by createdAt descending (ISO strings compare correctly lexicographically)
         patients.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import useAuthStore from "./store/authStore";
+import usePatientsStore from "./store/patientsStore";
 import PrivateRoute from "./components/PrivateRoute";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
@@ -16,11 +17,19 @@ import LoadingScreen from "./components/LoadingScreen";
 
 function App() {
   const { initializeAuth, loading } = useAuthStore();
+  const uid = useAuthStore((state) => state.currentUser?.uid);
+  const fetchPatients = usePatientsStore((state) => state.fetchPatients);
 
   useEffect(() => {
     const unsubscribe = initializeAuth();
     return () => unsubscribe();
   }, [initializeAuth]);
+
+  // Start loading the patient list the moment we know who is signed in, so it
+  // downloads while the dashboard route is still rendering instead of after.
+  useEffect(() => {
+    if (uid) fetchPatients();
+  }, [uid, fetchPatients]);
 
   if (loading) {
     return <LoadingScreen />;

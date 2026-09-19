@@ -1,34 +1,23 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import useAuthStore from "../store/authStore";
-import api from "../lib/axios";
+import usePatientsStore from "../store/patientsStore";
+import { onImageError } from "../lib/placeholderImage";
 import { Link } from "react-router-dom";
 import { Search, Loader2, User } from "lucide-react";
 import React from "react";
 export default function Patients() {
-    // We only need current user to know WHEN to fetch (if logged in)
-    const currentUser = useAuthStore((state) => state.currentUser);
-    const [patients, setPatients] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const patients = usePatientsStore((state) => state.patients);
+    const loaded = usePatientsStore((state) => state.loaded);
+    const error = usePatientsStore((state) => state.error);
+    const fetchPatients = usePatientsStore((state) => state.fetchPatients);
+    // Cached list (from the dashboard or App's prefetch) shows instantly;
+    // the spinner only appears on a genuinely empty first load.
+    const loading = !loaded && !error;
     const [searchTerm, setSearchTerm] = useState("");
 
     useEffect(() => {
-        const fetchPatients = async () => {
-            if (!currentUser) return;
-
-            try {
-                // api instance handles header injection automatically
-                const response = await api.get("/patients");
-                setPatients(response.data);
-            } catch (error) {
-                console.error("Error fetching patients:", error);
-            } finally {
-                setLoading(false);
-            }
-        };
-
         fetchPatients();
-    }, [currentUser]);
+    }, [fetchPatients]);
 
     const filteredPatients = patients.filter(patient =>
         patient.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -83,7 +72,7 @@ export default function Patients() {
                                 <div className="flex items-center gap-4 mb-4">
                                     <div className="w-12 h-12 rounded-full bg-slate-100 overflow-hidden flex items-center justify-center shrink-0 border border-slate-200">
                                         {patient.profileImage || patient.imageUrl ? (
-                                            <img src={patient.profileImage || patient.imageUrl} alt={patient.name} className="w-full h-full object-cover" />
+                                            <img src={patient.profileImage || patient.imageUrl} alt={patient.name} onError={onImageError} className="w-full h-full object-cover" />
                                         ) : (
                                             <User className="w-6 h-6 text-slate-400" />
                                         )}

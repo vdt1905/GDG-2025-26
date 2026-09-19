@@ -16,7 +16,7 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     # gunicorn + uvicorn worker, long timeout because Gemini calls can take 30-60s.
-    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT -w 1 -k uvicorn.workers.UvicornWorker --timeout 120
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT -w 1 -k uvicorn.workers.UvicornWorker --timeout 180
     healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
@@ -28,7 +28,7 @@ services:
       # Model ids are overridable so a provider deprecation can be fixed from the
       # dashboard without a redeploy (sarvam-30b was retired this way).
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.6-flash,gemini-3.5-flash   # tried in order
       - key: SARVAM_MODEL
         value: sarvam-105b
       - key: FIREBASE_SERVICE_ACCOUNT_JSON

@@ -1,13 +1,14 @@
 import { Link, useLocation } from "react-router-dom";
-import useAuthStore from "../store/authStore";
 import { LayoutDashboard, Users, UserPlus, LogOut, Activity, Sparkles } from "lucide-react";
-import React from "react";
+import React, { useCallback, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import SignOutDialog from "./SignOutDialog";
 
 
 export default function Sidebar({ isCollapsed }) {
-    const logout = useAuthStore((state) => state.logout);
     const location = useLocation();
+    const [confirmSignOut, setConfirmSignOut] = useState(false);
+    const closeSignOut = useCallback(() => setConfirmSignOut(false), []);
 
     const isActive = (path) => location.pathname === path;
 
@@ -99,7 +100,8 @@ export default function Sidebar({ isCollapsed }) {
 
             <div className="p-3 border-t border-slate-100">
                 <button
-                    onClick={() => logout()}
+                    type="button"
+                    onClick={() => setConfirmSignOut(true)}
                     title={isCollapsed ? "Sign Out" : ""}
                     className={`group flex items-center gap-3 px-3 py-3 w-full rounded-xl text-red-500 hover:bg-red-50 transition-colors relative ${isCollapsed ? "justify-center" : ""}`}
                 >
@@ -120,6 +122,7 @@ export default function Sidebar({ isCollapsed }) {
                     </AnimatePresence>
                 </button>
             </div>
+            <SignOutDialog open={confirmSignOut} onClose={closeSignOut} />
         </motion.div>
     );
 }

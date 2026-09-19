@@ -87,8 +87,19 @@ except Exception as e:
 # LLM providers via direct HTTP
 # --------------------------------------------------------------------------- #
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# Comma-separated, tried in order. Google retires Flash versions on short notice
+# (gemini-2.5-flash started 404ing "no longer available to new users" in Sep 2026)
+# and newer ones 503 under load, so one pinned id is a single point of failure.
+GEMINI_MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_MODEL", "gemini-3.6-flash,gemini-3.5-flash").split(",") if m.strip()]
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+# Retired (404), rate-limited (429) or overloaded (5xx): worth trying the next model.
+# Anything else (400 bad request, 403 bad key) would fail identically on every model.
+_GEMINI_FALLTHROUGH = {404, 429, 500, 502, 503, 504}
+# Total seconds for ALL Gemini attempts. The whole request (image fetch + CNNs +
+# Gemini + Sarvam fallback, ~30s) must finish inside gunicorn's --timeout, or the
+# worker is killed mid-request and the browser sees ERR_CONNECTION_RESET.
+GEMINI_BUDGET_S = float(os.getenv("GEMINI_BUDGET_S", "75"))
 
 # NOTE: sarvam-30b was retired by Sarvam (the API now 400s with
 # "Model 'sarvam-30b' has been deprecated"). sarvam-105b is the successor; it is a
@@ -117,7 +128,9 @@ APPLY THIS FRAMEWORK SYSTEMATICALLY (when an image is available):
 3. Algorithms: ABCD rule (Asymmetry, Border, Colour, Dermoscopic structures), the 7-point checklist, Menzies method, and "Chaos & Clues" for pigmented lesions. For non-melanocytic lesions use pattern recognition — BCC (arborizing vessels, leaf-like/spoke-wheel areas, blue-grey ovoid nests), keratinocyte/SCC (keratin, white circles, glomerular vessels), seborrhoeic keratosis (milia-like cysts, comedo-like openings), and vascular lesions (red/purple lacunes).
 4. Melanoma & malignancy vigilance: if features suggest melanoma, BCC, or SCC, state it explicitly and recommend histopathological confirmation (dermoscopy-guided biopsy/excision). Never understate a suspicious lesion.
 
-A convolutional neural network (CNN) has already classified the image. Treat its output as a PRIOR, not ground truth — corroborate or challenge it from the visible dermoscopic evidence. If no image is available to you (fallback path), reason from the CNN predictions and standard dermatology, and state clearly in the remarks that direct visual/dermoscopic confirmation by the clinician is required.
+STEP 0 — IS THERE ANY PATHOLOGY AT ALL? Before applying the framework, decide from the image alone whether there is a visible lesion or skin abnormality (pigmented lesion, papule/plaque, scale, erythema, vesicle, ulcer, nail/hair change, etc.). Normal skin markings — pores, fine hair, freckles/ephelides, normal skin lines, minor dryness, benign-appearing symmetric small moles, and normal pigmentation variation — are NOT pathology. If nothing abnormal is visible, the answer is Healthy: set verify to "Healthy,...", set the prediction condition to "Healthy", and write a short reassurance-and-routine-skin-care report instead of a differential diagnosis. Do not invent a lesion to match the CNN.
+
+A convolutional neural network (CNN) has also classified the image. IMPORTANT LIMITATION: the CNN is a CLOSED-SET classifier trained ONLY on disease images — it has NO "healthy" class and NO "unsure" option. It will therefore ALWAYS name a disease, often with very high confidence, even for completely normal skin or a non-skin photo. Its output is therefore ZERO evidence that any pathology exists; it only suggests WHICH disease to consider IF you can independently see an abnormality. Treat it as a weak prior to corroborate or challenge from the visible evidence, never as a reason to report disease. Its confidence numbers are uncalibrated. If no image is available to you (fallback path), reason from the CNN predictions and standard dermatology, and state clearly in the remarks that direct visual/dermoscopic confirmation by the clinician is required.
 
 CLINICAL GOVERNANCE:
 - Provide realistic, calibrated confidence — never a blanket 100%.
@@ -126,7 +139,7 @@ CLINICAL GOVERNANCE:
 - Do NOT fabricate citations or URLs. Reference guidance at the organisation level (e.g., AAD, NCCN, British Association of Dermatologists, WHO) only.
 
 OUTPUT CONTRACT — return ONLY these fields:
-- verify: ONE comma-separated line "<Healthy|Unhealthy>,<confidence %>,<Dry|Oily|Normal>,<one-line remark>" (no internal newlines).
+- verify: ONE comma-separated line "<Healthy|Unhealthy|Invalid>,<confidence %>,<Dry|Oily|Normal>,<one-line remark>" (no internal newlines). Use Invalid ONLY when the image is not human skin at all or is unusable (animal, object, blank, unreadable); then set the prediction condition to "Not a skin image".
 - prediction: ONE comma-separated line "<most likely condition>,<confidence %>,<two-line remark>" (no internal newlines). If the skin appears healthy, set the condition to "Healthy".
 - report: a detailed MARKDOWN report with these sections — ### Dermoscopic Observations, ### Differential Diagnosis (with reasoning), ### Brief Pathophysiology, ### Management Plan (pharmacological, procedural, lifestyle/home care), ### Red Flags & When to Refer, ### Prognosis & Follow-up.
 - jarvis: 4-6 markdown bullet points of guidance for the treating doctor — current evidence-based treatments, prescription considerations (drug classes/mechanisms), and the recommended next diagnostic steps.
@@ -144,6 +157,26 @@ def _loads_lenient(text: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         return json.loads(text, strict=False)
+
+
+def _strip_md_fence(text: str) -> str:
+    """Unwrap a whole-response ```markdown fence.
+
+    Sarvam often returns the entire note wrapped in a fence, which the UI then
+    renders as one grey code block instead of a formatted report. Only strips when
+    the fence encloses the WHOLE string, so genuine inline code blocks survive.
+    """
+    t = (text or "").strip()
+    if not t.startswith("```") or not t.endswith("```"):
+        return t
+    head, sep, rest = t[3:-3].partition("\n")
+    if not sep:                                              # one-liner ```foo```
+        return t
+    if head.strip().lower() not in ("", "markdown", "md", "text"):
+        return t                                             # ```python -> real code
+    if "```" in rest:                                        # inner fences -> not a wrapper
+        return t
+    return rest.strip()
 
 
 def _raise_for_status_verbose(resp: requests.Response, provider: str) -> None:
@@ -187,7 +220,38 @@ def _gemini_text(payload: dict) -> str:
     )
 
 
-def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[str]) -> dict:
+def _gemini_post(body: dict) -> tuple[dict, str]:
+    """POST to each configured Gemini model in turn; return (payload, model_used)."""
+    errors = []
+    deadline = time.monotonic() + GEMINI_BUDGET_S
+    for model in GEMINI_MODELS:
+        remaining = deadline - time.monotonic()
+        if remaining < 5:
+            errors.append(f"gemini budget ({GEMINI_BUDGET_S:.0f}s) exhausted before {model}")
+            break
+        try:
+            # Key goes in a header, not ?key=: requests puts the full URL in its error
+            # messages, which previously printed the API key into the Render logs.
+            r = requests.post(f"{GEMINI_BASE_URL}/{model}:generateContent",
+                              headers={"x-goog-api-key": GOOGLE_API_KEY or ""},
+                              json=body, timeout=(5, remaining))
+        except (requests.Timeout, requests.ConnectionError) as e:
+            print(f"[gemini] {model} timed out / unreachable, trying next: {type(e).__name__}")
+            errors.append(f"gemini/{model}: {type(e).__name__}")
+            continue
+        if r.ok:
+            return r.json(), model
+        try:
+            _raise_for_status_verbose(r, f"gemini/{model}")
+        except requests.HTTPError as e:
+            if r.status_code not in _GEMINI_FALLTHROUGH:
+                raise
+            print(f"[gemini] {model} unavailable, trying next: {e}")
+            errors.append(str(e))
+    raise RuntimeError(" || ".join(errors) or "no GEMINI_MODEL configured")
+
+
+def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[str]) -> tuple[dict, str]:
     """Gemini vision call returning structured JSON (verify/prediction/report/jarvis)."""
     parts = [{"text": user_text}]
     if image_b64:
@@ -202,9 +266,8 @@ def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[s
             "responseSchema": _RESPONSE_SCHEMA,
         },
     }
-    r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
-    _raise_for_status_verbose(r, "gemini")
-    return _loads_lenient(_gemini_text(r.json()))
+    payload, model = _gemini_post(body)
+    return _loads_lenient(_gemini_text(payload)), model
 
 
 def gemini_generate_text(system_text: str, user_text: str) -> str:
@@ -212,11 +275,11 @@ def gemini_generate_text(system_text: str, user_text: str) -> str:
     body = {
         "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+        # Gemini 3.x thinks by default and thinking tokens count against this cap.
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192},
     }
-    r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
-    _raise_for_status_verbose(r, "gemini")
-    return _gemini_text(r.json())
+    payload, _ = _gemini_post(body)
+    return _gemini_text(payload)
 
 
 def sarvam_generate_text(system_text: str, user_text: str) -> str:
@@ -228,7 +291,9 @@ def sarvam_generate_text(system_text: str, user_text: str) -> str:
             {"role": "user", "content": user_text},
         ],
         "temperature": 0.3,
-        "max_tokens": 4000,
+        # Reasoning model: hidden reasoning_content counts against this. 4000 was
+        # observed to run out (finish_reason=length, content=null) on a short note.
+        "max_tokens": 8000,
         "reasoning_effort": "low",
     }
     headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
@@ -243,7 +308,7 @@ def sarvam_generate_text(system_text: str, user_text: str) -> str:
             f"{SARVAM_MODEL} returned empty content (finish_reason="
             f"{choice.get('finish_reason')}); raise max_tokens."
         )
-    return content
+    return _strip_md_fence(content)
 
 
 # --------------------------- LangGraph definition --------------------------- #
@@ -254,6 +319,7 @@ class GraphState(TypedDict, total=False):
     secondary: dict
     result: Optional[dict]
     provider: Optional[str]
+    model: Optional[str]
     # Kept per-provider: a single `error` slot let the sarvam failure overwrite the
     # gemini one, so the 502 only ever reported the fallback's error.
     gemini_error: Optional[str]
@@ -262,8 +328,8 @@ class GraphState(TypedDict, total=False):
 
 def _gemini_node(state: GraphState) -> GraphState:
     try:
-        data = gemini_generate_json(SYSTEM_PROMPT, state["user_text"], state.get("image_b64"))
-        return {"result": data, "provider": "gemini"}
+        data, model = gemini_generate_json(SYSTEM_PROMPT, state["user_text"], state.get("image_b64"))
+        return {"result": data, "provider": "gemini", "model": model}
     except Exception as e:
         print(f"[gemini] failed -> falling back to sarvam: {e}")
         return {"result": None, "gemini_error": str(e)}
@@ -295,7 +361,7 @@ def _sarvam_node(state: GraphState) -> GraphState:
         ) or "Text-only fallback: report unavailable."
 
         result = {
-            "verify": f"Unhealthy,{conf_pct},Normal,Text-only fallback — visual confirmation required",
+            "verify": "Undetermined,0,Normal,No image was reviewed (text-only fallback); the CNN cannot distinguish healthy skin — clinician must confirm visually",
             "prediction": f"{p_class},{conf_pct},CNN model prediction; direct visual/dermoscopic confirmation by the clinician is required (text-only fallback).",
             "report": report,
             "jarvis": (f"**Text-only fallback ({SARVAM_MODEL}).** The primary vision model was "
@@ -303,7 +369,7 @@ def _sarvam_node(state: GraphState) -> GraphState:
                        "visually/dermoscopically before treatment and consider biopsy if any "
                        "malignant features are suspected."),
         }
-        return {"result": result, "provider": "sarvam"}
+        return {"result": result, "provider": "sarvam", "model": SARVAM_MODEL}
     except Exception as e:
         print(f"[sarvam] failed: {e}")
         return {"result": None, "sarvam_error": str(e)}
@@ -322,7 +388,7 @@ _graph.add_edge("sarvam", END)
 analysis_graph = _graph.compile()
 
 
-def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, secondary: dict) -> tuple[dict, str]:
+def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, secondary: dict) -> tuple[dict, str, str]:
     state = analysis_graph.invoke({
         "user_text": user_text, "image_b64": image_b64,
         "primary": primary, "secondary": secondary,
@@ -332,7 +398,7 @@ def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, second
             "AI service error -- both providers failed. "
             f"gemini: {state.get('gemini_error')} | sarvam: {state.get('sarvam_error')}"
         ))
-    return state["result"], state.get("provider", "unknown")
+    return state["result"], state.get("provider", "unknown"), state.get("model") or "unknown"
 
 
 def answer_question(system_text: str, user_text: str) -> str:
@@ -421,29 +487,37 @@ def classify_image(req: Id):
     image_b64 = base64.b64encode(buf.getvalue()).decode()
 
     user_text = (
-        "A skin lesion image has been submitted for analysis. A CNN classifier reports:\n"
-        f"- Primary: {primary['class']} (confidence {primary['confidence']:.2f})\n"
-        f"- Secondary: {secondary['class']} (confidence {secondary['confidence']:.2f})\n\n"
-        "If an image is attached, analyze it dermoscopically using your framework and "
-        "corroborate or challenge the CNN prior. If no image is attached, reason from the "
-        "CNN predictions and note that direct visual confirmation is required. "
+        "A skin image has been submitted for analysis. Two closed-set CNN classifiers "
+        "(no healthy class — they always name a disease) report, for reference only:\n"
+        f"- Model A: {primary['class']} ({primary['confidence']:.2f}); "
+        f"runner-up {primary.get('runner_up', 'n/a')} ({primary.get('runner_up_confidence', 0):.2f})\n"
+        f"- Model B: {secondary['class']} ({secondary['confidence']:.2f}); "
+        f"runner-up {secondary.get('runner_up', 'n/a')} ({secondary.get('runner_up_confidence', 0):.2f})\n\n"
+        "First decide from the image itself whether any pathology is visible at all "
+        "(STEP 0). If the skin looks normal, report Healthy regardless of the CNN. "
+        "Otherwise analyze it dermoscopically using your framework and corroborate or "
+        "challenge the CNN prior. If no image is attached, reason from the CNN predictions "
+        "and note that direct visual confirmation is required. "
         "Produce the structured analysis exactly as specified."
     )
 
-    data, provider = run_analysis(user_text, image_b64, primary, secondary)
-    print(f"[analysis] provider={provider}")
+    data, provider, model = run_analysis(user_text, image_b64, primary, secondary)
+    print(f"[analysis] provider={provider} model={model}")
 
     verify = str(data.get("verify") or "Unknown,0,Normal,No remarks")
     prediction = str(data.get("prediction") or f"{primary['class']},{primary['confidence'] * 100:.0f},")
     report = str(data.get("report") or "No detailed report available.")
     jarvis = str(data.get("jarvis") or "")
 
-    # Derived from the configured model ids so the footer can't drift out of date.
-    provider_label = {
-        "gemini": f"Google Gemini ({GEMINI_MODEL})",
-        "sarvam": f"Sarvam ({SARVAM_MODEL})",
-    }.get(provider, provider)
+    # Names the model that actually answered (Gemini may have fallen through the list).
+    provider_label = {"gemini": "Google Gemini", "sarvam": "Sarvam"}.get(provider, provider)
+    provider_label = f"{provider_label} ({model})"
     report = f"{report}\n\n---\n*🩺 Report generated by ShushrutAI — powered by **{provider_label}**.*"
+
+    verify_parts = [v.strip() for v in verify.split(",")]
+    status = verify_parts[0].lower()
+    is_healthy = status == "healthy"
+    is_invalid = status == "invalid"
 
     pred_parts = prediction.split(",")
     diagnosis = pred_parts[0].strip() if pred_parts else primary["class"]
@@ -451,6 +525,30 @@ def classify_image(req: Id):
         confidence = float(pred_parts[1].replace("%", "").strip()) / 100 if len(pred_parts) > 1 else primary["confidence"]
     except (ValueError, IndexError):
         confidence = primary["confidence"]
+
+    # The vision model's verify verdict is the gate. If it saw healthy skin but
+    # still echoed a CNN disease name into `prediction`, the headline must not
+    # contradict it -- the CNN cannot say "healthy", so it never gets the last word.
+    if is_healthy and diagnosis.lower() != "healthy":
+        try:
+            confidence = float(verify_parts[1].replace("%", "")) / 100
+        except (ValueError, IndexError):
+            pass
+        remark = " ".join(pred_parts[2:]).strip() or "No visible pathology; CNN suggestion disregarded."
+        diagnosis = "Healthy"
+        prediction = f"Healthy,{confidence * 100:.0f},{remark}"
+    if is_invalid:
+        # Not human skin: neither a disease name nor "Healthy" is an honest headline.
+        remark = " ".join(pred_parts[2:]).strip() or (verify_parts[3] if len(verify_parts) > 3 else "")
+        diagnosis, confidence = "Not a skin image", 0.0
+        prediction = f"Not a skin image,0,{remark}"
+    if status == "undetermined":
+        # Text-only fallback: nothing looked at the image, and the CNN cannot say
+        # "healthy", so its class must not be presented as a diagnosis at 100%.
+        remark = " ".join(pred_parts[2:]).strip()
+        diagnosis, confidence = f"Undetermined (unverified CNN suggestion: {pred_parts[0].strip()})", 0.0
+        prediction = f"{diagnosis},0,{remark}"
+    confidence = max(0.0, min(1.0, confidence))
 
     result = {
         "imageUrl": image_url,
