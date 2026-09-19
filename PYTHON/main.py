@@ -9,7 +9,7 @@ Designed to run in ~200MB RAM (fits a 512MB host):
 Pipeline (per /predict):
   1. Resolve the image URL (request, or the patient's latest skin image).
   2. Run the local ONNX classifiers (predict_c + predict_d).
-  3. LangGraph: gemini (vision, primary) --on failure--> sarvam-30b (text fallback).
+  3. LangGraph: gemini (vision, primary) --on failure--> sarvam (text fallback).
   4. Save the report to Firestore and return it.
 """
 
@@ -90,7 +90,11 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-SARVAM_MODEL = os.getenv("SARVAM_MODEL", "sarvam-30b")
+# NOTE: sarvam-30b was retired by Sarvam (the API now 400s with
+# "Model 'sarvam-30b' has been deprecated"). sarvam-105b is the successor; it is a
+# reasoning model, so max_tokens must stay generous or the budget is spent on
+# reasoning_content and `content` comes back null.
+SARVAM_MODEL = os.getenv("SARVAM_MODEL", "sarvam-105b")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v1")
 
@@ -142,6 +146,47 @@ def _loads_lenient(text: str) -> dict:
         return json.loads(text, strict=False)
 
 
+def _raise_for_status_verbose(resp: requests.Response, provider: str) -> None:
+    """Like resp.raise_for_status(), but keeps the provider's error body.
+
+    Plain raise_for_status() reports only "400 Client Error: Bad Request for url: ..."
+    and discards the body -- which is where the actionable message lives (an invalid
+    API key, a retired model name). Losing it turns a one-line fix into a log hunt.
+    """
+    if resp.ok:
+        return
+    detail = (resp.text or "").strip()
+    try:
+        payload = resp.json()
+        detail = str(payload.get("error", payload)) if isinstance(payload, dict) else str(payload)
+    except ValueError:
+        pass
+    raise requests.HTTPError(
+        f"{provider} HTTP {resp.status_code}: {detail[:600]}", response=resp
+    )
+
+
+def _gemini_text(payload: dict) -> str:
+    """Pull the text out of a generateContent response, or explain why there isn't any.
+
+    A 200 response can still carry no text -- blocked by a safety filter, or the
+    thinking budget consumed maxOutputTokens (finishReason MAX_TOKENS), which leaves
+    `content` with no `parts`. Indexing straight in would raise a bare KeyError.
+    """
+    candidates = payload.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"gemini returned no candidates: {payload.get('promptFeedback', payload)}")
+    cand = candidates[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    for part in parts:
+        if part.get("text"):
+            return part["text"]
+    raise RuntimeError(
+        f"gemini returned no text (finishReason={cand.get('finishReason')}); "
+        "if MAX_TOKENS, raise maxOutputTokens -- thinking tokens count against it."
+    )
+
+
 def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[str]) -> dict:
     """Gemini vision call returning structured JSON (verify/prediction/report/jarvis)."""
     parts = [{"text": user_text}]
@@ -158,9 +203,8 @@ def gemini_generate_json(system_text: str, user_text: str, image_b64: Optional[s
         },
     }
     r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
-    r.raise_for_status()
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return _loads_lenient(text)
+    _raise_for_status_verbose(r, "gemini")
+    return _loads_lenient(_gemini_text(r.json()))
 
 
 def gemini_generate_text(system_text: str, user_text: str) -> str:
@@ -171,8 +215,8 @@ def gemini_generate_text(system_text: str, user_text: str) -> str:
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }
     r = requests.post(GEMINI_ENDPOINT, params={"key": GOOGLE_API_KEY}, json=body, timeout=90)
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    _raise_for_status_verbose(r, "gemini")
+    return _gemini_text(r.json())
 
 
 def sarvam_generate_text(system_text: str, user_text: str) -> str:
@@ -189,8 +233,17 @@ def sarvam_generate_text(system_text: str, user_text: str) -> str:
     }
     headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
     r = requests.post(f"{SARVAM_BASE_URL}/chat/completions", json=body, headers=headers, timeout=90)
-    r.raise_for_status()
-    return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    _raise_for_status_verbose(r, "sarvam")
+    choice = r.json()["choices"][0]
+    content = (choice["message"].get("content") or "").strip()
+    if not content:
+        # Reasoning models return content=null when max_tokens is spent on
+        # reasoning_content. Fail loudly rather than shipping a placeholder note.
+        raise RuntimeError(
+            f"{SARVAM_MODEL} returned empty content (finish_reason="
+            f"{choice.get('finish_reason')}); raise max_tokens."
+        )
+    return content
 
 
 # --------------------------- LangGraph definition --------------------------- #
@@ -201,7 +254,10 @@ class GraphState(TypedDict, total=False):
     secondary: dict
     result: Optional[dict]
     provider: Optional[str]
-    error: Optional[str]
+    # Kept per-provider: a single `error` slot let the sarvam failure overwrite the
+    # gemini one, so the 502 only ever reported the fallback's error.
+    gemini_error: Optional[str]
+    sarvam_error: Optional[str]
 
 
 def _gemini_node(state: GraphState) -> GraphState:
@@ -210,13 +266,13 @@ def _gemini_node(state: GraphState) -> GraphState:
         return {"result": data, "provider": "gemini"}
     except Exception as e:
         print(f"[gemini] failed -> falling back to sarvam: {e}")
-        return {"result": None, "error": str(e)}
+        return {"result": None, "gemini_error": str(e)}
 
 
 def _sarvam_node(state: GraphState) -> GraphState:
     """Text-only fallback: build CSV fields from CNN, use Sarvam for a concise report."""
     if not SARVAM_API_KEY:
-        return {"result": None, "error": "Sarvam fallback not configured (set SARVAM_API_KEY)."}
+        return {"result": None, "sarvam_error": "not configured (set SARVAM_API_KEY)"}
     try:
         p = state.get("primary") or {}
         s = state.get("secondary") or {}
@@ -242,7 +298,7 @@ def _sarvam_node(state: GraphState) -> GraphState:
             "verify": f"Unhealthy,{conf_pct},Normal,Text-only fallback — visual confirmation required",
             "prediction": f"{p_class},{conf_pct},CNN model prediction; direct visual/dermoscopic confirmation by the clinician is required (text-only fallback).",
             "report": report,
-            "jarvis": ("**Text-only fallback (Sarvam-30b).** The primary vision model was "
+            "jarvis": (f"**Text-only fallback ({SARVAM_MODEL}).** The primary vision model was "
                        "unavailable, so this note is based on the CNN prediction only. Confirm "
                        "visually/dermoscopically before treatment and consider biopsy if any "
                        "malignant features are suspected."),
@@ -250,7 +306,7 @@ def _sarvam_node(state: GraphState) -> GraphState:
         return {"result": result, "provider": "sarvam"}
     except Exception as e:
         print(f"[sarvam] failed: {e}")
-        return {"result": None, "error": str(e)}
+        return {"result": None, "sarvam_error": str(e)}
 
 
 def _route_after_gemini(state: GraphState) -> str:
@@ -272,18 +328,30 @@ def run_analysis(user_text: str, image_b64: Optional[str], primary: dict, second
         "primary": primary, "secondary": secondary,
     })
     if not state.get("result"):
-        raise HTTPException(status_code=502, detail=f"AI service error: {state.get('error')}")
+        raise HTTPException(status_code=502, detail=(
+            "AI service error -- both providers failed. "
+            f"gemini: {state.get('gemini_error')} | sarvam: {state.get('sarvam_error')}"
+        ))
     return state["result"], state.get("provider", "unknown")
 
 
 def answer_question(system_text: str, user_text: str) -> str:
     try:
         return gemini_generate_text(system_text, user_text)
-    except Exception as e:
-        print(f"[gemini /ans] failed -> sarvam: {e}")
+    except Exception as gemini_err:
+        print(f"[gemini /ans] failed -> sarvam: {gemini_err}")
         if not SARVAM_API_KEY:
-            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
-        return sarvam_generate_text(system_text, user_text)
+            raise HTTPException(status_code=502, detail=f"AI service error -- gemini: {gemini_err}")
+        try:
+            return sarvam_generate_text(system_text, user_text)
+        except Exception as sarvam_err:
+            # Previously this escaped unhandled and FastAPI returned a bare
+            # "Internal Server Error" with no clue which provider broke.
+            print(f"[sarvam /ans] failed: {sarvam_err}")
+            raise HTTPException(status_code=502, detail=(
+                "AI service error -- both providers failed. "
+                f"gemini: {gemini_err} | sarvam: {sarvam_err}"
+            ))
 
 
 # --------------------------------------------------------------------------- #
@@ -370,7 +438,11 @@ def classify_image(req: Id):
     report = str(data.get("report") or "No detailed report available.")
     jarvis = str(data.get("jarvis") or "")
 
-    provider_label = {"gemini": "Google Gemini", "sarvam": "Sarvam-30b"}.get(provider, provider)
+    # Derived from the configured model ids so the footer can't drift out of date.
+    provider_label = {
+        "gemini": f"Google Gemini ({GEMINI_MODEL})",
+        "sarvam": f"Sarvam ({SARVAM_MODEL})",
+    }.get(provider, provider)
     report = f"{report}\n\n---\n*🩺 Report generated by ShushrutAI — powered by **{provider_label}**.*"
 
     pred_parts = prediction.split(",")
@@ -433,4 +505,9 @@ def get_ans(q: Query):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 6700))
+    png_data = analysis_graph.get_graph().draw_mermaid_png()
+
+# 2. Save the image data to a file
+    with open("graph.png", "wb") as f:
+        f.write(png_data)
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
