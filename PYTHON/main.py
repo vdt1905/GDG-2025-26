@@ -147,6 +147,31 @@ OUTPUT CONTRACT — return ONLY these fields:
 Write for a physician audience: precise, clinical, and empathetic."""
 
 
+_LITERAL_ESCAPES = ((chr(92) + "r" + chr(92) + "n", "\n"),
+                    (chr(92) + "n", "\n"),
+                    (chr(92) + "t", "    "))
+
+
+def _unescape_literal_newlines(value):
+    r"""Turn literal backslash-n sequences into real newlines.
+
+    Gemini's structured output intermittently double-escapes control characters,
+    so `report` arrives holding the two characters \ and n instead of a line
+    break. That shows up as visible \n\n in the UI and the PDF, collapsing the
+    whole markdown report into one blob. Markdown never needs a literal \n, so
+    converting is safe. Real newlines are left untouched.
+    """
+    if isinstance(value, str):
+        for literal, real in _LITERAL_ESCAPES:
+            value = value.replace(literal, real)
+        return value
+    if isinstance(value, dict):
+        return {k: _unescape_literal_newlines(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unescape_literal_newlines(v) for v in value]
+    return value
+
+
 def _loads_lenient(text: str) -> dict:
     text = (text or "").strip()
     if text.startswith("```"):
@@ -154,9 +179,10 @@ def _loads_lenient(text: str) -> dict:
         if text[:4].lower() == "json":
             text = text[4:]
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        return json.loads(text, strict=False)
+        parsed = json.loads(text, strict=False)
+    return _unescape_literal_newlines(parsed)
 
 
 def _strip_md_fence(text: str) -> str:
@@ -308,7 +334,7 @@ def sarvam_generate_text(system_text: str, user_text: str) -> str:
             f"{SARVAM_MODEL} returned empty content (finish_reason="
             f"{choice.get('finish_reason')}); raise max_tokens."
         )
-    return _strip_md_fence(content)
+    return _strip_md_fence(_unescape_literal_newlines(content))
 
 
 # --------------------------- LangGraph definition --------------------------- #

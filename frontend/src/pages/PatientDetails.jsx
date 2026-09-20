@@ -8,8 +8,9 @@ import { ArrowLeft, Calendar, Mail, Phone, User, Activity, Plus, Loader2, Trash,
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { jsPDF } from "jspdf";
-import ReactMarkdown from 'react-markdown';
+import ReportMarkdown from "../components/ReportMarkdown";
 import PLACEHOLDER_IMAGE, { onImageError } from "../lib/placeholderImage";
+import { renderMarkdownToPdf, sanitizeForPdf } from "../lib/pdfMarkdown";
 
 // Simple Circular Progress Component
 const CircularProgress = ({ value, label, subLabel, color = "text-teal-600" }) => {
@@ -397,7 +398,7 @@ export default function PatientDetails() {
         doc.text(verifyType, 50, yPos + 31);
 
         doc.setFontSize(8);
-        const splitVerifyRemark = doc.splitTextToSize(`"${verifyRemark}"`, 80);
+        const splitVerifyRemark = doc.splitTextToSize(`"${sanitizeForPdf(verifyRemark)}"`, 80);
         doc.setTextColor(71, 85, 105);
         doc.text(splitVerifyRemark, 19, yPos + 52);
 
@@ -418,7 +419,7 @@ export default function PatientDetails() {
 
         doc.setFontSize(8);
         doc.setTextColor(71, 85, 105);
-        const splitPredRemark = doc.splitTextToSize(predRemark, 80);
+        const splitPredRemark = doc.splitTextToSize(sanitizeForPdf(predRemark), 80);
         if (splitPredRemark.length > 2) splitPredRemark.length = 2; // Truncate for space
         doc.text(splitPredRemark, 113, yPos + 52);
 
@@ -439,20 +440,10 @@ export default function PatientDetails() {
         doc.setTextColor(15, 23, 42); // Slate 900 Black
 
         const reportText = report.report || report.pred || "No content available";
-        const cleanText = reportText.replace(/[*#]/g, '');
-        const splitText = doc.splitTextToSize(cleanText, 180);
-
-        // Robust Pagination Loop
-        const lineHeight = 5;
-        const pageMarginBottom = 20;
-
-        splitText.forEach(line => {
-            if (yPos > pageHeight - pageMarginBottom) {
-                doc.addPage();
-                yPos = 25; // Top margin for new page
-            }
-            doc.text(line, 14, yPos);
-            yPos += lineHeight;
+        // Renders headings/bullets/bold and paginates itself. Previously this
+        // stripped all # and * and printed the result as one flat blob.
+        yPos = renderMarkdownToPdf(doc, reportText, {
+            x: 14, y: yPos, width: 180, pageTop: 25, pageBottom: 20,
         });
 
         // Footer
@@ -921,10 +912,10 @@ export default function PatientDetails() {
                                         <Activity className="w-5 h-5 text-teal-700" />
                                         <h3 className="text-lg font-bold text-slate-800">Detailed Medical Analysis</h3>
                                     </div>
-                                    <div className="p-8 prose max-w-none text-slate-900 prose-headings:font-bold prose-headings:text-slate-900 prose-h2:text-teal-800 prose-h3:text-slate-800 prose-p:text-slate-700 prose-li:text-slate-700 prose-strong:text-slate-900 prose-ul:text-slate-700 prose-ol:text-slate-700">
-                                        <ReactMarkdown>
+                                    <div className="p-8 max-w-none text-slate-900">
+                                        <ReportMarkdown>
                                             {previewReport.report || "**No detailed report available.**"}
-                                        </ReactMarkdown>
+                                        </ReportMarkdown>
                                     </div>
                                 </div>
 
@@ -1000,8 +991,8 @@ export default function PatientDetails() {
                                         <div className="space-y-6">
                                             <div>
                                                 <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Detailed Report</h4>
-                                                <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 font-sans text-sm text-slate-700 leading-relaxed prose prose-teal max-w-none">
-                                                    <ReactMarkdown>{analysisResult.report}</ReactMarkdown>
+                                                <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 font-sans text-sm leading-relaxed max-w-none">
+                                                    <ReportMarkdown>{analysisResult.report}</ReportMarkdown>
                                                 </div>
                                             </div>
 
