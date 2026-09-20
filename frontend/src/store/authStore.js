@@ -12,7 +12,25 @@ import {
     updateProfile
 } from "firebase/auth";
 import { auth } from "../firebase";
+import api from "../lib/axios";
 import usePatientsStore from "./patientsStore";
+
+/**
+ * Create the doctor's Firestore profile via POST /api/doctors/profile.
+ *
+ * Called once on first sign-up / first Google sign-in. Best-effort: a failure
+ * must not block sign-in, and a 409 just means the profile already exists
+ * (a returning Google user), so it is not an error.
+ */
+async function createDoctorProfile(fields) {
+    try {
+        await api.post("/doctors/profile", fields);
+    } catch (err) {
+        if (err?.response?.status !== 409) {
+            console.error("Could not create doctor profile:", err);
+        }
+    }
+}
 
 // Popup errors where a full-page redirect will still work. Browsers that block
 // popups, or enforce a strict Cross-Origin-Opener-Policy (the "COOP would block
@@ -50,6 +68,9 @@ const useAuthStore = create((set) => ({
             // onAuthStateChanged fired before the name was set; refresh local state.
             set({ currentUser: { ...userCredential.user, displayName: fullName } });
         }
+        // Firebase Auth only stores credentials; the doctor's record lives in
+        // Firestore and is created by the backend route.
+        await createDoctorProfile({ name: fullName });
         return userCredential;
     },
 
@@ -63,7 +84,11 @@ const useAuthStore = create((set) => ({
         const provider = new GoogleAuthProvider();
         provider.setCustomParameters({ prompt: "select_account" });
         try {
-            return await signInWithPopup(auth, provider);
+            const result = await signInWithPopup(auth, provider);
+            // First Google sign-in has no Firestore record yet; a repeat sign-in
+            // gets a 409 back, which createDoctorProfile ignores.
+            await createDoctorProfile({ name: result.user.displayName });
+            return result;
         } catch (err) {
             if (POPUP_FALLBACK_CODES.has(err?.code)) {
                 await signInWithRedirect(auth, provider);

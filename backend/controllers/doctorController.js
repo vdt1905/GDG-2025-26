@@ -26,6 +26,50 @@ const getProfile = async (req, res) => {
     }
 };
 
+// Create Doctor Profile
+// This is the one place a doctor document is created. POST creates, PUT updates.
+// The document ID is the Firebase Auth UID from the verified token, so a doctor
+// can only ever create their own profile.
+const createProfile = async (req, res) => {
+    try {
+        const doctorId = req.user.uid;
+        const docRef = db.collection("doctors").doc(doctorId);
+
+        // Creating twice is a client mistake, so say so instead of overwriting.
+        const existing = await docRef.get();
+        if (existing.exists) {
+            return res.status(409).json({
+                message: "Profile already exists. Use PUT /api/doctors/profile to update it.",
+                ...existing.data()
+            });
+        }
+
+        const { name, specialization, clinicName, phone } = req.body;
+        const now = new Date().toISOString();
+
+        const profileData = {
+            name: name || req.user.name || "Doctor",
+            // Email and photo come from the verified token, not the request body,
+            // so they always match the real account.
+            email: req.user.email || "",
+            profileImage: req.user.picture || "",
+            specialization: specialization || "General Dermatologist",
+            clinicName: clinicName || "My Clinic",
+            phone: phone || "",
+            createdAt: now,
+            updatedAt: now
+        };
+
+        await docRef.set(profileData);
+
+        console.log("Created doctor profile for:", doctorId);
+        res.status(201).json({ message: "Doctor profile created", id: doctorId, ...profileData });
+    } catch (error) {
+        console.error("Error creating doctor profile:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
 // Update Doctor Profile
 const updateProfile = async (req, res) => {
     try {
@@ -77,5 +121,6 @@ const updateProfile = async (req, res) => {
 
 module.exports = {
     getProfile,
+    createProfile,
     updateProfile
 };

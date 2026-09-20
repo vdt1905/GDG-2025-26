@@ -1,5 +1,5 @@
 const express = require("express");
-const { getProfile, updateProfile } = require("../controllers/doctorController");
+const { getProfile, createProfile, updateProfile } = require("../controllers/doctorController");
 const verifyToken = require("../middleware/authMiddleware");
 const upload = require("../middleware/uploadMiddleware");
 
@@ -8,6 +8,10 @@ const router = express.Router();
 router.use(verifyToken);
 
 router.get("/profile", getProfile);
+
+// Creates the doctor's Firestore document (doctors/{uid}). JSON body, no file.
+router.post("/profile", createProfile);
+
 router.put("/profile",
     upload.single("image"),
     (req, res, next) => {
