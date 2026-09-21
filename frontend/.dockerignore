@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+npm-debug.log*
+Dockerfile
+.dockerignore
+
+# NOTE: .env is deliberately NOT ignored. The build stage needs the VITE_FIREBASE_*
+# web config from it; those values are public (they end up in the JS bundle), and
+# only the final nginx stage (static files) ships, not the build stage.

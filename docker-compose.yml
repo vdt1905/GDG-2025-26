@@ -1,0 +1,71 @@
+# ShushrutAI — full stack locally.
+#
+#   docker compose up --build
+#
+#   Frontend  http://localhost:3000
+#   Backend   http://localhost:5000      (Express API, /api/*)
+#   Python    http://localhost:8000      (FastAPI AI server, /predict, /ans)
+#
+# Prerequisites (all already used by the non-Docker setup, none committed to git):
+#   backend/.env                  CLOUDINARY_*, CORS_ORIGIN, ...
+#   backend/serviceAccountKey.json  Firebase Admin key, shared by backend + python
+#   PYTHON/.env                   GOOGLE_API_KEY, SARVAM_API_KEY
+#   frontend/.env                 VITE_FIREBASE_* web config
+
+name: shushrutai
+
+services:
+  python:
+    build: ./PYTHON
+    env_file:
+      # Optional so `docker compose build` also works where the file is absent
+      # (a fresh clone, CI). The service still needs it to actually run.
+      - path: ./PYTHON/.env
+        required: false
+    environment:
+      PORT: "8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # main.py falls back to ../backend/serviceAccountKey.json relative to its
+      # working dir (/app), i.e. /backend/serviceAccountKey.json.
+      - ./backend/serviceAccountKey.json:/backend/serviceAccountKey.json:ro
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file:
+      # Optional so `docker compose build` also works where the file is absent
+      # (a fresh clone, CI). The service still needs it to actually run.
+      - path: ./backend/.env
+        required: false
+    environment:
+      # Pinned here so a PORT/CORS value in backend/.env can't break the mapping.
+      PORT: "5000"
+      CORS_ORIGIN: "http://localhost:3000"
+      # Server-to-server calls go over the compose network, by service name.
+      PYTHON_URL: "http://python:8000"
+    ports:
+      - "5000:5000"
+    volumes:
+      # firebaseAdmin.js falls back to require("../serviceAccountKey.json")
+      # from /app/config, i.e. /app/serviceAccountKey.json.
+      - ./backend/serviceAccountKey.json:/app/serviceAccountKey.json:ro
+    depends_on:
+      python:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # The BROWSER calls these, so they are host URLs, not service names.
+        VITE_BACKEND_URL: "http://localhost:5000/api"
+        VITE_PYTHON_URL: "http://localhost:8000"
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

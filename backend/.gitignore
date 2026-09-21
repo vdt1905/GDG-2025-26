@@ -2,7 +2,8 @@
 node_modules/
 pnpm-lock.yaml
 yarn.lock
-package-lock.json
+# package-lock.json is deliberately NOT ignored: it pins exact dependency
+# versions, and `npm ci` (CI, Dockerfile) refuses to run without it.
 
 # Environment variables
 .env

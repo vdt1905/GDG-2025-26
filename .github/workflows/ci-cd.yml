@@ -1,0 +1,154 @@
+# ShushrutAI CI/CD
+#
+#   CI  (every push and pull request):  test each service, then build the Docker images.
+#   CD  (only a push to main, only if CI passed):  publish the images to GitHub
+#        Container Registry, then trigger a Render deploy of the AI service.
+#
+# No secrets are needed for CI. CD uses the built-in GITHUB_TOKEN, plus one optional
+# repo secret, RENDER_DEPLOY_HOOK_URL.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:          # "Run workflow" button on the Actions tab
+
+# A newer push to the same branch cancels the older, now-pointless run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- CI: frontend
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22           # Vite 7 needs >= 22.12
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      # Reported but not blocking: the codebase has pre-existing lint errors.
+      # Remove continue-on-error once they are cleaned up.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
+      - name: Build
+        run: npm run build
+
+  # ----------------------------------------------------------------- CI: backend
+  backend:
+    name: Backend (install + syntax check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci --omit=dev
+      # The server can't boot without the Firebase key (not available in CI),
+      # so check that every source file at least parses.
+      - name: Syntax check
+        run: |
+          for f in $(git ls-files '*.js'); do
+            node --check "$f"
+          done
+          echo "OK: $(git ls-files '*.js' | wc -l) files"
+
+  # ------------------------------------------------------------ CI: AI service
+  python:
+    name: AI service (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: PYTHON
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: PYTHON/requirements.txt
+      - run: pip install -r requirements.txt pytest
+      - name: Tests
+        run: pytest -q
+
+  # ------------------------------------------------------ CI + CD: Docker images
+  # Always builds all three images (so a broken Dockerfile fails the PR).
+  # Pushes them to ghcr.io only for a push to main.
+  docker:
+    name: Docker (${{ matrix.service }})
+    needs: [frontend, backend, python]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: frontend
+            context: frontend
+          - service: backend
+            context: backend
+          - service: python
+            context: PYTHON
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build${{ env.PUBLISH == 'true' && ' and push' || '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/shushrutai-${{ matrix.service }}:latest
+            ghcr.io/${{ github.repository_owner }}/shushrutai-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # --------------------------------------------------------------- CD: deploy
+  deploy:
+    name: Deploy AI service to Render
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Trigger Render deploy
+        if: env.RENDER_DEPLOY_HOOK_URL != ''
+        run: |
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL" >/dev/null
+          echo "Render deploy triggered for ${GITHUB_SHA::7}."
+      - name: Skip (no deploy hook configured)
+        if: env.RENDER_DEPLOY_HOOK_URL == ''
+        run: echo "::notice::RENDER_DEPLOY_HOOK_URL secret not set; skipping the Render deploy. Frontend and backend deploy via Vercel's Git integration."

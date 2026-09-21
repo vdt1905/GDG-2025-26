@@ -5,6 +5,7 @@
   <h3>Advanced Dermatological Intelligence</h3>
 
   <p>
+    <a href="https://github.com/vdt1905/GDG-2025-26/actions/workflows/ci-cd.yml"><img src="https://img.shields.io/github/actions/workflow/status/vdt1905/GDG-2025-26/ci-cd.yml?branch=main&style=for-the-badge&label=CI%2FCD" alt="CI/CD"></a>
     <a href="https://github.com/vdt1905/GDG-2025-26/stargazers"><img src="https://img.shields.io/github/stars/vdt1905/GDG-2025-26?style=for-the-badge&color=blue" alt="Stars"></a>
     <a href="https://github.com/vdt1905/GDG-2025-26/issues"><img src="https://img.shields.io/github/issues/vdt1905/GDG-2025-26?style=for-the-badge&color=orange" alt="Issues"></a>
     <a href="https://github.com/vdt1905/GDG-2025-26/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge" alt="License"></a>
@@ -66,6 +67,31 @@ It goes beyond simple classification. Shushrut AI employs a **Multi-Agent System
 ## ⚡ Getting Started
 
 Follow these steps to set up the project locally.
+
+### 🐳 Quick start with Docker
+
+Runs all three services with one command. You need the same local secrets as the manual setup below (none of them are committed to git):
+
+| File | Contents |
+|---|---|
+| `backend/serviceAccountKey.json` | Firebase Admin key, shared by the backend and the AI service |
+| `backend/.env` | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` |
+| `PYTHON/.env` | `GOOGLE_API_KEY`, `SARVAM_API_KEY` |
+| `frontend/.env` | `VITE_FIREBASE_*` web config |
+
+```bash
+docker compose up --build     # first run: ~3 min to build
+```
+
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:5000 |
+| AI service | http://localhost:8000 |
+
+Secrets are mounted or injected when the containers start, so they are never baked into an image. Stop everything with `docker compose down`.
+
+> The frontend build hard-codes the API URLs (Vite inlines `VITE_*` at build time). If you change the ports in `docker-compose.yml`, change the frontend `build.args` to match and rebuild with `--build`.
 
 ### Prerequisites
 *   Node.js (v16+)

@@ -1,0 +1,11 @@
+# Secrets: supplied at runtime via env_file / bind mount, never copied in.
+.env
+.env.*
+serviceAccountKey.json
+
+node_modules/
+npm-debug.log*
+.vercel/
+vercel.json
+Dockerfile
+.dockerignore

@@ -1,0 +1,24 @@
+# Secrets: supplied at runtime via env_file / bind mount, never copied in.
+.env
+.env.*
+*.json
+
+# PyTorch weights: the server runs ONNX only (predict_c/predict_d), so these
+# 41MB are dead weight in the image.
+models/*.pth
+notebooks/
+
+# Local artefacts
+__pycache__/
+*.pyc
+.venv/
+venv/
+temp_image.png
+graph.png
+.python-version
+Dockerfile
+.dockerignore
+
+# CI tests: not needed at runtime.
+tests/
+.pytest_cache/
