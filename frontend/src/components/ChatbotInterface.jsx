@@ -10,19 +10,29 @@ import DoctorIllustration from '../assets/bot2.png';
 
 const ChatbotInterface = () => {
     const [isOpen, setIsOpen] = useState(false);
-    const [messages, setMessages] = useState([
-        { text: "Hello! I'm Dr. Shushrut. How can I assist with your health today?", sender: 'bot' }
-    ]);
+    // The "no voice" note is decided up front rather than appended from an
+    // effect after mount, which costs an extra render.
+    const [messages, setMessages] = useState(() => {
+        const greeting = { text: "Hello! I'm Dr. Shushrut. How can I assist with your health today?", sender: 'bot' };
+        const hasSpeech = Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+        return hasSpeech ? [greeting] : [greeting, {
+            text: "Note: Voice commands are not supported in your browser. Please type your questions.",
+            sender: 'bot'
+        }];
+    });
     const [inputValue, setInputValue] = useState('');
     const [isListening, setIsListening] = useState(false);
     const [isBotTyping, setIsBotTyping] = useState(false);
-    const [avatarExpression, setAvatarExpression] = useState('neutral');
+    // Only the setter is used: the expression is tracked but not currently
+    // rendered anywhere (the avatar is a static image).
+    const [, setAvatarExpression] = useState('neutral');
     const [chatOpen, setChatOpen] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const [deepSearch, setDeepSearch] = useState(false);
     const [inputFocused, setInputFocused] = useState(false);
     const messagesEndRef = useRef(null);
     const recognitionRef = useRef(null);
+    const sendMessageRef = useRef(null);
 
     // Initialize speech recognition
     useEffect(() => {
@@ -37,7 +47,10 @@ const ChatbotInterface = () => {
             recognitionRef.current.onresult = (event) => {
                 const transcript = event.results[0][0].transcript;
                 setInputValue(transcript);
-                handleSendMessage(transcript);
+                // Via a ref: this handler is created once, so calling
+                // handleSendMessage directly used the first render's copy, and
+                // voice questions ignored the Deep Search toggle.
+                sendMessageRef.current?.(transcript);
             };
 
             recognitionRef.current.onerror = (event) => {
@@ -55,17 +68,13 @@ const ChatbotInterface = () => {
 
             recognitionRef.current.onend = () => {
                 setIsListening(false);
-                if (avatarExpression === 'listening') {
-                    setAvatarExpression('examining');
-                }
+                // Updater form reads the current value; the plain variable was
+                // frozen at its initial 'neutral', so this never fired.
+                setAvatarExpression(prev => (prev === 'listening' ? 'examining' : prev));
             };
         } else {
+            // The user-facing note is part of the initial messages state.
             console.warn('Speech recognition not supported in this browser');
-            // Optionally add a message to inform the user
-            setMessages(prev => [...prev, {
-                text: "Note: Voice commands are not supported in your browser. Please type your questions.",
-                sender: 'bot'
-            }]);
         }
 
         return () => {
@@ -177,6 +186,12 @@ const ChatbotInterface = () => {
             setTimeout(() => setAvatarExpression('neutral'), 3000);
         }, 1500 + Math.random() * 2000);
     };
+
+    // Keep the speech-recognition handler pointed at the latest handleSendMessage
+    // (see onresult above).
+    useEffect(() => {
+        sendMessageRef.current = handleSendMessage;
+    });
 
     const toggleExpand = () => {
         setIsExpanded(!isExpanded);

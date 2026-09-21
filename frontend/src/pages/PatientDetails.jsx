@@ -59,32 +59,39 @@ const CircularProgress = ({ value, label, subLabel, color = "text-teal-600" }) =
 // Camera Feed Component
 const CameraFeed = ({ onCapture }) => {
     const videoRef = React.useRef(null);
-    const [stream, setStream] = useState(null);
+    // A ref, not state: the cleanup below must see the live stream. With state,
+    // the cleanup closed over the first render's `null`, so the tracks were never
+    // stopped and the webcam stayed on after the modal closed.
+    const streamRef = React.useRef(null);
 
     useEffect(() => {
-        startCamera();
-        return () => stopCamera();
-    }, []);
+        let cancelled = false;
 
-    const startCamera = async () => {
-        try {
-            const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
-            setStream(mediaStream);
-            if (videoRef.current) {
-                videoRef.current.srcObject = mediaStream;
+        const startCamera = async () => {
+            try {
+                const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                // Closed before the permission prompt resolved: release it at once.
+                if (cancelled) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                    return;
+                }
+                streamRef.current = mediaStream;
+                if (videoRef.current) {
+                    videoRef.current.srcObject = mediaStream;
+                }
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                alert("Could not access camera. Please check permissions.");
             }
-        } catch (err) {
-            console.error("Error accessing camera:", err);
-            alert("Could not access camera. Please check permissions.");
-        }
-    };
+        };
 
-    const stopCamera = () => {
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-            setStream(null);
-        }
-    };
+        startCamera();
+        return () => {
+            cancelled = true;
+            streamRef.current?.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        };
+    }, []);
 
     const takePhoto = () => {
         if (videoRef.current) {
@@ -189,7 +196,7 @@ export default function PatientDetails() {
     const handleDeleteImage = async (imageUrl) => {
         if (!window.confirm("Delete this image?")) return;
         try {
-            const response = await api.delete(`/patients/${id}/images?imageUrl=${encodeURIComponent(imageUrl)}`);
+            await api.delete(`/patients/${id}/images?imageUrl=${encodeURIComponent(imageUrl)}`);
             const refreshedPatient = await api.get(`/patients/${id}`);
             setPatient(refreshedPatient.data);
         } catch (error) {
@@ -828,7 +835,7 @@ export default function PatientDetails() {
                                     const predRemark = predParts.slice(2).join(',') || "No remarks.";
 
                                     // Helper for "Nice UI" Card
-                                    const ReportCard = ({ title, status, progressValue, progressLabel, details, bgHeader, borderColor, progressColor, children }) => (
+                                    const ReportCard = ({ title, status, progressValue, details, bgHeader, borderColor, progressColor, children }) => (
                                         <div className={`bg-white rounded-xl shadow-sm border-[1.5px] ${borderColor} flex flex-col overflow-hidden h-full`}>
                                             {/* Header Strip */}
                                             <div className={`${bgHeader} px-6 py-4 border-b ${borderColor} flex justify-between items-center`}>

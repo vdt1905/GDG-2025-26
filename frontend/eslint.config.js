@@ -2,6 +2,7 @@ import js from '@eslint/js'
 import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
+import react from 'eslint-plugin-react'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
@@ -22,8 +23,16 @@ export default defineConfig([
         sourceType: 'module',
       },
     },
+    plugins: { react },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Core no-unused-vars can't see JSX usage, so `<motion.div>` and
+      // `<Icon />` were reported as unused. This rule marks them as used.
+      'react/jsx-uses-vars': 'error',
+      'no-unused-vars': ['error', {
+        varsIgnorePattern: '^[A-Z_]',
+        // `({ node, ...props })` deliberately strips `node` before spreading.
+        ignoreRestSiblings: true,
+      }],
     },
   },
 ])
