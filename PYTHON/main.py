@@ -87,27 +87,61 @@ except Exception as e:
 # LLM providers via direct HTTP
 # --------------------------------------------------------------------------- #
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-# Comma-separated, tried in order. Google retires Flash versions on short notice
-# (gemini-2.5-flash started 404ing "no longer available to new users" in Sep 2026)
-# and newer ones 503 under load, so one pinned id is a single point of failure.
-GEMINI_MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_MODEL", "gemini-3.6-flash,gemini-3.5-flash").split(",") if m.strip()]
+def _model_list(env_var: str, default: str) -> list[str]:
+    return [m.strip() for m in os.getenv(env_var, default).split(",") if m.strip()]
+
+
+# Fallback chain, tried in order: every Gemini model first (they can see the
+# image), and only then Sarvam (text-only). Benchmarked 2026-09-21 with the real
+# vision + JSON-schema request:
+#   - full Flash models give the best reports but 503 under load, and a 503 can
+#     take up to ~45s to come back;
+#   - the Flash-Lite models answered in 6-14s and got healthy vs lesion right;
+#   - gemini-2.5-flash(-lite) and 2.5-pro 404 (retired); Pro models 429 (no quota
+#     on this key), so they are left out.
+GEMINI_MODELS = _model_list(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite",
+)
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 # Retired (404), rate-limited (429) or overloaded (5xx): worth trying the next model.
 # Anything else (400 bad request, 403 bad key) would fail identically on every model.
 _GEMINI_FALLTHROUGH = {404, 429, 500, 502, 503, 504}
-# Total seconds for ALL Gemini attempts. The whole request (image fetch + CNNs +
-# Gemini + Sarvam fallback, ~30s) must finish inside gunicorn's --timeout, or the
-# worker is killed mid-request and the browser sees ERR_CONNECTION_RESET.
-GEMINI_BUDGET_S = float(os.getenv("GEMINI_BUDGET_S", "75"))
 
-# NOTE: sarvam-30b was retired by Sarvam (the API now 400s with
-# "Model 'sarvam-30b' has been deprecated"). sarvam-105b is the successor; it is a
-# reasoning model, so max_tokens must stay generous or the budget is spent on
-# reasoning_content and `content` comes back null.
-SARVAM_MODEL = os.getenv("SARVAM_MODEL", "sarvam-105b")
+# Timing. The whole request (image fetch + CNNs + Gemini chain + Sarvam chain)
+# must finish inside gunicorn's --timeout (180s), or the worker is killed
+# mid-request and the browser sees ERR_CONNECTION_RESET.
+#   15 fetch + 100 Gemini + 50 Sarvam = 165s.
+# The per-attempt cap stops one slow 503 eating the budget meant for the rest.
+GEMINI_BUDGET_S = float(os.getenv("GEMINI_BUDGET_S", "100"))
+GEMINI_ATTEMPT_TIMEOUT_S = float(os.getenv("GEMINI_ATTEMPT_TIMEOUT_S", "35"))
+
+# Sarvam now offers only these two: sarvam-30b and sarvam-m 400 with "has been
+# deprecated". -conversations answered the fallback prompt in ~2s vs 12-18s for
+# sarvam-105b (a reasoning model) at comparable quality, so it goes first.
+SARVAM_MODELS = _model_list("SARVAM_MODEL", "sarvam-105b-conversations,sarvam-105b")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai/v1")
+SARVAM_BUDGET_S = float(os.getenv("SARVAM_BUDGET_S", "50"))
+
+# After a model fails, skip it for a while instead of paying its failure cost
+# again on every request: under load each 503 costs seconds before we move on.
+# In-process only (one gunicorn worker), which is all this needs.
+_COOLDOWN_S = {404: 3600.0, 429: 60.0}   # retired: 1h; rate-limited: 1 min
+_DEFAULT_COOLDOWN_S = 30.0               # 5xx / timeout / unreachable
+_cooldown_until: dict[str, float] = {}
+
+
+def _cool_down(model: str, status: Optional[int] = None) -> None:
+    _cooldown_until[model] = time.monotonic() + _COOLDOWN_S.get(status, _DEFAULT_COOLDOWN_S)
+
+
+def _available(models: list[str]) -> list[str]:
+    """Models not cooling down, in configured order. If every one is cooling
+    down, try them all anyway: a slow answer beats a guaranteed failure."""
+    now = time.monotonic()
+    ready = [m for m in models if _cooldown_until.get(m, 0.0) <= now]
+    return ready or list(models)
 
 _RESPONSE_SCHEMA = {
     "type": "object",
@@ -250,7 +284,7 @@ def _gemini_post(body: dict) -> tuple[dict, str]:
     """POST to each configured Gemini model in turn; return (payload, model_used)."""
     errors = []
     deadline = time.monotonic() + GEMINI_BUDGET_S
-    for model in GEMINI_MODELS:
+    for model in _available(GEMINI_MODELS):
         remaining = deadline - time.monotonic()
         if remaining < 5:
             errors.append(f"gemini budget ({GEMINI_BUDGET_S:.0f}s) exhausted before {model}")
@@ -260,10 +294,11 @@ def _gemini_post(body: dict) -> tuple[dict, str]:
             # messages, which previously printed the API key into the Render logs.
             r = requests.post(f"{GEMINI_BASE_URL}/{model}:generateContent",
                               headers={"x-goog-api-key": GOOGLE_API_KEY or ""},
-                              json=body, timeout=(5, remaining))
+                              json=body, timeout=(5, min(remaining, GEMINI_ATTEMPT_TIMEOUT_S)))
         except (requests.Timeout, requests.ConnectionError) as e:
             print(f"[gemini] {model} timed out / unreachable, trying next: {type(e).__name__}")
             errors.append(f"gemini/{model}: {type(e).__name__}")
+            _cool_down(model)
             continue
         if r.ok:
             return r.json(), model
@@ -274,6 +309,7 @@ def _gemini_post(body: dict) -> tuple[dict, str]:
                 raise
             print(f"[gemini] {model} unavailable, trying next: {e}")
             errors.append(str(e))
+            _cool_down(model, r.status_code)
     raise RuntimeError(" || ".join(errors) or "no GEMINI_MODEL configured")
 
 
@@ -308,33 +344,50 @@ def gemini_generate_text(system_text: str, user_text: str) -> str:
     return _gemini_text(payload)
 
 
-def sarvam_generate_text(system_text: str, user_text: str) -> str:
-    """Sarvam (OpenAI-compatible, text-only, reasoning-capped) call."""
+def _sarvam_once(model: str, system_text: str, user_text: str, timeout: float) -> str:
     body = {
-        "model": SARVAM_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_text},
             {"role": "user", "content": user_text},
         ],
         "temperature": 0.3,
-        # Reasoning model: hidden reasoning_content counts against this. 4000 was
-        # observed to run out (finish_reason=length, content=null) on a short note.
+        # sarvam-105b is a reasoning model: hidden reasoning_content counts against
+        # this. 4000 was observed to run out (content=null) on a short note.
         "max_tokens": 8000,
         "reasoning_effort": "low",
     }
     headers = {"Authorization": f"Bearer {SARVAM_API_KEY}", "Content-Type": "application/json"}
-    r = requests.post(f"{SARVAM_BASE_URL}/chat/completions", json=body, headers=headers, timeout=90)
-    _raise_for_status_verbose(r, "sarvam")
+    r = requests.post(f"{SARVAM_BASE_URL}/chat/completions", json=body, headers=headers,
+                      timeout=(5, timeout))
+    _raise_for_status_verbose(r, f"sarvam/{model}")
     choice = r.json()["choices"][0]
     content = (choice["message"].get("content") or "").strip()
     if not content:
-        # Reasoning models return content=null when max_tokens is spent on
-        # reasoning_content. Fail loudly rather than shipping a placeholder note.
+        # Fail loudly rather than shipping a placeholder clinical note.
         raise RuntimeError(
-            f"{SARVAM_MODEL} returned empty content (finish_reason="
-            f"{choice.get('finish_reason')}); raise max_tokens."
+            f"{model} returned empty content (finish_reason={choice.get('finish_reason')})"
         )
     return _strip_md_fence(_unescape_literal_newlines(content))
+
+
+def sarvam_generate_text(system_text: str, user_text: str) -> tuple[str, str]:
+    """Text-only fallback: try each Sarvam model in turn; return (text, model_used)."""
+    errors = []
+    deadline = time.monotonic() + SARVAM_BUDGET_S
+    for model in _available(SARVAM_MODELS):
+        remaining = deadline - time.monotonic()
+        if remaining < 3:
+            errors.append(f"sarvam budget ({SARVAM_BUDGET_S:.0f}s) exhausted before {model}")
+            break
+        try:
+            return _sarvam_once(model, system_text, user_text, remaining), model
+        except Exception as e:
+            print(f"[sarvam] {model} failed, trying next: {e}")
+            errors.append(str(e))
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            _cool_down(model, status)
+    raise RuntimeError(" || ".join(errors) or "no SARVAM_MODEL configured")
 
 
 # --------------------------- LangGraph definition --------------------------- #
@@ -381,21 +434,21 @@ def _sarvam_node(state: GraphState) -> GraphState:
             "management (topical/oral/lifestyle), and red flags / when to refer. State clearly "
             "that direct visual/dermoscopic confirmation by the clinician is required."
         )
-        report = sarvam_generate_text(
+        report, sarvam_model = sarvam_generate_text(
             "You are an expert dermatologist writing for another doctor. Answer directly and concisely, no preamble.",
             prompt,
-        ) or "Text-only fallback: report unavailable."
+        )
 
         result = {
             "verify": "Undetermined,0,Normal,No image was reviewed (text-only fallback); the CNN cannot distinguish healthy skin — clinician must confirm visually",
             "prediction": f"{p_class},{conf_pct},CNN model prediction; direct visual/dermoscopic confirmation by the clinician is required (text-only fallback).",
             "report": report,
-            "jarvis": (f"**Text-only fallback ({SARVAM_MODEL}).** The primary vision model was "
+            "jarvis": (f"**Text-only fallback ({sarvam_model}).** The primary vision model was "
                        "unavailable, so this note is based on the CNN prediction only. Confirm "
                        "visually/dermoscopically before treatment and consider biopsy if any "
                        "malignant features are suspected."),
         }
-        return {"result": result, "provider": "sarvam", "model": SARVAM_MODEL}
+        return {"result": result, "provider": "sarvam", "model": sarvam_model}
     except Exception as e:
         print(f"[sarvam] failed: {e}")
         return {"result": None, "sarvam_error": str(e)}
@@ -435,7 +488,8 @@ def answer_question(system_text: str, user_text: str) -> str:
         if not SARVAM_API_KEY:
             raise HTTPException(status_code=502, detail=f"AI service error -- gemini: {gemini_err}")
         try:
-            return sarvam_generate_text(system_text, user_text)
+            text, _ = sarvam_generate_text(system_text, user_text)
+            return text
         except Exception as sarvam_err:
             # Previously this escaped unhandled and FastAPI returned a bare
             # "Internal Server Error" with no clue which provider broke.

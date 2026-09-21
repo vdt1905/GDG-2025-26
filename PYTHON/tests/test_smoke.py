@@ -75,6 +75,86 @@ def test_non_skin_image_is_reported_as_such(client, monkeypatch):
     assert d["confidence"] == 0.0
 
 
+# ----------------------------------------------------- LLM fallback chain tests
+class FakeResponse:
+    def __init__(self, status, payload):
+        self.status_code, self._payload = status, payload
+        self.ok = 200 <= status < 300
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+GEMINI_OK = {"candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]}
+SARVAM_OK = {"choices": [{"message": {"content": "note"}, "finish_reason": "stop"}]}
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    """Route requests.post to a per-model scripted status; record the call order."""
+    monkeypatch.setattr(main, "_cooldown_until", {})
+    calls, script = [], {}
+
+    def post(url, json=None, **kw):
+        model = json.get("model") or url.split("/models/")[1].split(":")[0]
+        calls.append(model)
+        status = script.get(model, 200)
+        if status != 200:
+            return FakeResponse(status, {"error": {"message": f"{model} said {status}"}})
+        return FakeResponse(200, SARVAM_OK if "sarvam" in model else GEMINI_OK)
+
+    monkeypatch.setattr(main.requests, "post", post)
+    monkeypatch.setattr(main, "GEMINI_MODELS", ["g1", "g2", "g3"])
+    monkeypatch.setattr(main, "SARVAM_MODELS", ["sarvam-a", "sarvam-b"])
+    return calls, script
+
+
+def test_gemini_falls_through_overloaded_and_retired_models(fake_http):
+    calls, script = fake_http
+    script.update({"g1": 503, "g2": 404})
+    _, model = main._gemini_post({})
+    assert model == "g3"
+    assert calls == ["g1", "g2", "g3"]
+
+
+def test_failed_model_is_skipped_on_the_next_request(fake_http):
+    calls, script = fake_http
+    script["g1"] = 503
+    main._gemini_post({})
+    calls.clear()
+    _, model = main._gemini_post({})
+    assert calls == ["g2"], "g1 should be cooling down, not retried every request"
+    assert model == "g2"
+
+
+def test_bad_key_stops_the_chain_instead_of_trying_every_model(fake_http):
+    calls, script = fake_http
+    script["g1"] = 403            # same key would fail identically on every model
+    with pytest.raises(Exception):
+        main._gemini_post({})
+    assert calls == ["g1"]
+
+
+def test_everything_cooling_down_still_gets_one_more_try(fake_http):
+    calls, script = fake_http
+    script.update({"g1": 503, "g2": 503, "g3": 503})
+    with pytest.raises(RuntimeError):
+        main._gemini_post({})
+    calls.clear()
+    script.clear()                 # the service recovered
+    _, model = main._gemini_post({})
+    assert model == "g1", "with all models cooling down it must retry, not fail instantly"
+
+
+def test_sarvam_chain_falls_through_and_reports_the_model_used(fake_http):
+    calls, script = fake_http
+    script["sarvam-a"] = 500
+    text, model = main.sarvam_generate_text("sys", "user")
+    assert (text, model) == ("note", "sarvam-b")
+    assert calls == ["sarvam-a", "sarvam-b"]
+
+
 def test_literal_newline_escapes_are_repaired():
     backslash = chr(92)
     parsed = main._loads_lenient('{"report": "### A' + backslash * 2 + 'n- b"}')

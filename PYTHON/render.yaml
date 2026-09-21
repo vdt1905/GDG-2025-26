@@ -27,9 +27,10 @@ services:
         sync: false          # set in dashboard (secret) — fallback LLM
       # Model ids are overridable so a provider deprecation can be fixed from the
       # dashboard without a redeploy (sarvam-30b was retired this way).
+      # Tried left to right: all Gemini models (vision) before any Sarvam (text-only).
       - key: GEMINI_MODEL
-        value: gemini-3.6-flash,gemini-3.5-flash   # tried in order
+        value: gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite
       - key: SARVAM_MODEL
-        value: sarvam-105b
+        value: sarvam-105b-conversations,sarvam-105b
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false          # set in dashboard: minified serviceAccountKey.json
